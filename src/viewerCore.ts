@@ -260,14 +260,81 @@ function buildJointOrderIndexToBoneIndex(jointNames: string[], jointOrderNames: 
 }
 
 function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, prototypeRoot?: SdfPrimSpec): SdfPrimSpec | null {
-  const binding = prim.properties?.get('material:binding');
-  const dv: any = binding?.defaultValue;
-  if (!dv || typeof dv !== 'object' || dv.type !== 'sdfpath' || typeof dv.value !== 'string') {
-    console.log(`[resolveMaterialBinding] prim=${prim.path?.primPath} -> NO material:binding property`);
+  // USD material binding commonly inherits down namespace: a parent prim can bind a material
+  // that applies to all descendant meshes. So we must walk up ancestors to find the nearest binding.
+  //
+  // Additionally, some files may author binding variants like `material:binding:preview`.
+  const pickBindingProp = (p: SdfPrimSpec): { key: string; dv: any } | null => {
+    const props = p.properties;
+    if (!props) return null;
+
+    const direct = props.get('material:binding');
+    if (direct?.defaultValue !== undefined) return { key: 'material:binding', dv: direct.defaultValue as any };
+
+    // Fallback: look for other material binding relationships (e.g. `material:binding:preview`).
+    // Ignore property fields (anything after a dot) like `.connect` or `.timeSamples`.
+    for (const [k, spec] of props.entries()) {
+      if (k === 'material:binding') continue;
+      if (!k.startsWith('material:binding')) continue;
+      if (k.includes('.')) continue;
+      if (spec.defaultValue === undefined) continue;
+      return { key: k, dv: spec.defaultValue as any };
+    }
+    return null;
+  };
+
+  const extractFirstSdfPath = (dv: any): string | null => {
+    if (!dv) return null;
+    if (typeof dv === 'object' && dv.type === 'sdfpath' && typeof dv.value === 'string') return dv.value;
+    // Relationships can be authored as arrays of sdfpaths (e.g. `rel prototypes = [</A>, </B>]`).
+    if (typeof dv === 'object' && dv.type === 'array' && Array.isArray(dv.value)) {
+      for (const el of dv.value) {
+        const p = extractFirstSdfPath(el);
+        if (p) return p;
+      }
+    }
+    // Some dict/listOp representations can wrap a `value` field.
+    if (typeof dv === 'object' && dv.type === 'dict' && dv.value && typeof dv.value === 'object' && 'value' in dv.value) {
+      return extractFirstSdfPath((dv.value as any).value);
+    }
+    return null;
+  };
+
+  const stopAtPath = prototypeRoot?.path?.primPath ?? null;
+  let cur: SdfPrimSpec | null = prim;
+  let bindingPath: string | null = null;
+  let bindingKey: string | null = null;
+
+  while (cur) {
+    const picked = pickBindingProp(cur);
+    if (picked) {
+      const p = extractFirstSdfPath(picked.dv);
+      if (p) {
+        bindingPath = p;
+        bindingKey = picked.key;
+        break;
+      }
+    }
+
+    const curPath = cur.path?.primPath;
+    if (!curPath || curPath === '/') break;
+    if (stopAtPath && curPath === stopAtPath) break;
+
+    const parts = curPath.split('/').filter(Boolean);
+    parts.pop();
+    const parentPath = parts.length ? '/' + parts.join('/') : '/';
+    cur = findPrimByPath(root, parentPath);
+  }
+
+  if (!bindingPath) {
+    console.log(`[resolveMaterialBinding] prim=${prim.path?.primPath} -> NO material binding found (including ancestors)`);
     return null;
   }
-  const materialPath = dv.value as string;
-  console.log(`[resolveMaterialBinding] prim=${prim.path?.primPath}, materialPath=${materialPath}, prototypeRoot=${prototypeRoot?.path?.primPath}`);
+
+  const materialPath = bindingPath;
+  console.log(
+    `[resolveMaterialBinding] prim=${prim.path?.primPath}, bindingKey=${bindingKey}, materialPath=${materialPath}, prototypeRoot=${prototypeRoot?.path?.primPath}`,
+  );
 
   // If path is absolute (starts with /), try resolving from root first.
   // If that fails and we have a prototypeRoot, try resolving relative to prototype root
@@ -393,7 +460,23 @@ function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSpec): Sd
   // Fallback: try absolute path lookup (works for non-referenced materials)
   const result = findPrimByPath(root, shaderPath);
   console.log(`[resolveShaderFromMaterial] shaderPath=${shaderPath}, shaderName=${shaderName}, foundByAbsPath=${result?.path?.primPath ?? 'null'}`);
-  return result ? followOutputsToShader(result) : null;
+  if (result) return followOutputsToShader(result);
+
+  // Last-resort fallback: some composed stages lose/alter `outputs:surface.connect` targets.
+  // In that case, try to find *any* Shader under the material prim and use it.
+  // This prevents "fully gray" fallback materials when the material binding exists but the connect path doesn't resolve.
+  const stack: SdfPrimSpec[] = [];
+  if (material.children) for (const c of material.children.values()) stack.push(c);
+  while (stack.length) {
+    const p = stack.pop()!;
+    const infoId = p.properties?.get('info:id')?.defaultValue;
+    if (p.typeName === 'Shader' || (typeof infoId === 'string' && infoId.length > 0)) {
+      console.warn(`[resolveShaderFromMaterial] Fallback-picked shader under material: ${p.path?.primPath} (info:id=${String(infoId)})`);
+      return followOutputsToShader(p);
+    }
+    if (p.children) for (const c of p.children.values()) stack.push(c);
+  }
+  return null;
 }
 
 function resolveConnectedPrim(root: SdfPrimSpec, from: SdfPrimSpec, inputName: string): SdfPrimSpec | null {
@@ -1054,6 +1137,45 @@ function createMaterialFromShader(
   // Handle both UsdPreviewSurface and MaterialX's ND_UsdPreviewSurface_surfaceshader
   const isUsdPreviewSurface = shaderType === 'UsdPreviewSurface' || shaderType === 'ND_UsdPreviewSurface_surfaceshader';
   if (isUsdPreviewSurface) {
+    const guessSolidColorFromAssetPath = (assetPath: string): THREE.Color | null => {
+      const p = (assetPath ?? '').replace(/\\/g, '/').toLowerCase();
+      const base = p.split('/').pop() ?? '';
+      const stem = base.replace(/\.[^.]+$/, '');
+      // These corpora often use "global-colors/<name>.jpg" for flat color swatches.
+      const named: Record<string, number> = {
+        red: 0xcc2a2a,
+        blue: 0x2a61cc,
+        green: 0x2ecc71,
+        white: 0xffffff,
+        black: 0x111111,
+        grey: 0x808080,
+        gray: 0x808080,
+        greylight: 0xc7c7c7,
+        graylight: 0xc7c7c7,
+        greymedium: 0x7f7f7f,
+        graymedium: 0x7f7f7f,
+        mediumgrey: 0x7f7f7f,
+        mediumgray: 0x7f7f7f,
+        lightgrey: 0xc7c7c7,
+        lightgray: 0xc7c7c7,
+      };
+      if (stem in named) return new THREE.Color(named[stem]!);
+
+      // Heuristics for common swatch naming
+      if (stem.includes('grey') || stem.includes('gray')) {
+        if (stem.includes('light')) return new THREE.Color(0xc7c7c7);
+        if (stem.includes('dark')) return new THREE.Color(0x404040);
+        if (stem.includes('medium')) return new THREE.Color(0x7f7f7f);
+        return new THREE.Color(0x808080);
+      }
+      if (stem.includes('red')) return new THREE.Color(0xcc2a2a);
+      if (stem.includes('blue')) return new THREE.Color(0x2a61cc);
+      if (stem.includes('green')) return new THREE.Color(0x2ecc71);
+
+      // For other missing textures (window/frontlight/backlight), keep default behavior.
+      return null;
+    };
+
     const inputs = extractShaderInputs(shader, materialPrim);
     console.log('[NormalBiasScale DEBUG] createMaterialFromShader inputs:', {
       diffuseColor: inputs.diffuseColor ? `rgb(${inputs.diffuseColor.r}, ${inputs.diffuseColor.g}, ${inputs.diffuseColor.b})` : 'none',
@@ -1144,7 +1266,8 @@ function createMaterialFromShader(
               url,
               (tex: any) => {
                 const cs = (info.sourceColorSpace ?? '').toLowerCase();
-                tex.colorSpace = cs === 'srgb' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+                // Many USDs omit `inputs:sourceColorSpace` for baseColor/diffuse textures; default those to sRGB.
+                tex.colorSpace = (cs === 'srgb' || cs === '') ? THREE.SRGBColorSpace : THREE.NoColorSpace;
                 applyWrapMode(tex, info.wrapS, info.wrapT);
                 if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
                 mat.map = tex;
@@ -1166,6 +1289,15 @@ function createMaterialFromShader(
               undefined,
               (err: unknown) => {
                 console.error('Failed to load UsdPreviewSurface diffuse texture:', info.file, url, err);
+                // Fallback: many corpora use flat color swatch textures; if those are missing (404),
+                // infer a reasonable constant base color from the filename so the model isn't fully gray/white.
+                const guessed = guessSolidColorFromAssetPath(info.file);
+                if (guessed) {
+                  mat.map = null;
+                  mat.color.copy(guessed);
+                  mat.needsUpdate = true;
+                  console.warn('UsdPreviewSurface diffuse texture missing; using guessed baseColor from filename:', info.file, guessed.getHexString());
+                }
               },
             );
           }
@@ -1388,7 +1520,7 @@ uniform vec3 usdNormalBias;`
               url,
               (tex: any) => {
                 const cs = (info.sourceColorSpace ?? '').toLowerCase();
-                tex.colorSpace = cs === 'srgb' ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+                tex.colorSpace = (cs === 'srgb' || cs === '') ? THREE.SRGBColorSpace : THREE.NoColorSpace;
                 applyWrapMode(tex, info.wrapS, info.wrapT);
                 if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
                 mat.emissiveMap = tex;
@@ -1767,8 +1899,9 @@ function getPropMetadataNumber(prop: { metadata?: Record<string, SdfValue> } | u
  * This converts between leftHanded and rightHanded orientation.
  * For indexed geometry, swaps indices. For non-indexed, swaps vertex positions.
  * @param recomputeNormals - If true, recompute vertex normals after flipping (use when normals aren't authored)
+ * @param smoothNormals - If true, recompute smooth normals for de-indexed geometry when possible
  */
-function flipGeometryWinding(geom: THREE.BufferGeometry, recomputeNormals = false): void {
+function flipGeometryWinding(geom: THREE.BufferGeometry, recomputeNormals = false, smoothNormals = true): void {
   const index = geom.getIndex();
   if (index) {
     // Indexed geometry: swap second and third vertex of each triangle
@@ -1805,8 +1938,9 @@ function flipGeometryWinding(geom: THREE.BufferGeometry, recomputeNormals = fals
     swapTriVerts(geom.getAttribute('_originalPointIndex') as THREE.BufferAttribute, 1);
   }
   if (recomputeNormals) {
-    // For non-indexed geometry with _originalPointIndex, use smooth normal computation
-    if (!index && geom.getAttribute('_originalPointIndex')) {
+    // For non-indexed geometry with _originalPointIndex, optionally use smooth normal computation.
+    // When smoothNormals=false, fall back to flat normals (computeVertexNormals on de-indexed geometry).
+    if (!index && smoothNormals && geom.getAttribute('_originalPointIndex')) {
       computeSmoothNormalsDeindexed(geom);
     } else {
       geom.computeVertexNormals();
@@ -1964,7 +2098,18 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
   }
 
   // UVs (primvars:st)
-  const stProp = prim.properties?.get('primvars:st');
+  // Note: some exporters (notably 3ds Max) author UVs as `primvars:map1` instead of `primvars:st`.
+  const uvPrimvarName =
+    prim.properties?.has('primvars:st')
+      ? 'primvars:st'
+      : prim.properties?.has('primvars:map1')
+        ? 'primvars:map1'
+        : prim.properties?.has('primvars:uv')
+          ? 'primvars:uv'
+          : prim.properties?.has('primvars:st0')
+            ? 'primvars:st0'
+            : null;
+  const stProp = uvPrimvarName ? prim.properties?.get(uvPrimvarName) : undefined;
   const stInterp = getPropMetadataString(stProp, 'interpolation');
   const st = (() => {
     const dv: any = stProp?.defaultValue;
@@ -1980,7 +2125,7 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
     }
     return arr;
   })();
-  const stIndices = parseNumberArray(getPrimProp(prim, 'primvars:st:indices'));
+  const stIndices = uvPrimvarName ? parseNumberArray(getPrimProp(prim, `${uvPrimvarName}:indices`)) : null;
 
   // primvars:displayColor support (common "viewport color" in USD)
   const displayColorProp = prim.properties?.get('primvars:displayColor');
@@ -1996,10 +2141,15 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
   const colorsIndices = parseNumberArray(getPrimProp(prim, 'primvars:colors:indices'));
 
   // Authored normals support
-  const normalsProp = prim.properties?.get('normals');
+  // Canonical USD Mesh normals are the `normals` attribute, but some exporters author them as a primvar:
+  // `primvars:normals` (often faceVarying for hard edges).
+  const normalsName =
+    prim.properties?.has('normals') ? 'normals' : prim.properties?.has('primvars:normals') ? 'primvars:normals' : null;
+  const normalsProp = normalsName ? prim.properties?.get(normalsName) : undefined;
   let normalsInterp = getPropMetadataString(normalsProp, 'interpolation');
   const normals = parseTuple3ArrayToFloat32(normalsProp?.defaultValue);
-  const normalsIndices = parseNumberArray(getPrimProp(prim, 'normals:indices'));
+  const normalsIndices = normalsName ? parseNumberArray(getPrimProp(prim, `${normalsName}:indices`)) : null;
+  const hasNormals = !!(normals && normals.length > 0);
 
   let triCount = 0;
   for (const c of faceVertexCounts) {
@@ -2012,13 +2162,38 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
   const numTris = triCount;
   if (numVerts > 500_000 || numTris > 1_000_000) return null;
 
-  // Infer normals interpolation if not authored explicitly (heuristic based on array length).
-  if (normals && !normalsInterp) {
-    const nCount = normals.length / 3;
-    if (nCount === numVerts) normalsInterp = 'vertex';
-    else if (nCount === faceVertexIndices.length) normalsInterp = 'faceVarying';
-    else if (nCount === faceVertexCounts.length) normalsInterp = 'uniform';
+  // Infer normals interpolation if not authored explicitly.
+  //
+  // IMPORTANT: Many USD exporters author indexed normals:
+  // - `normals` holds a unique table of normal vectors
+  // - `normals:indices` maps each element (vertex / faceVarying corner / face) into that table
+  //
+  // In those cases, looking only at `normals.length` can misclassify interpolation (and produce
+  // overly-smooth shading). Prefer inferring from the *indices* array length when present.
+  if (hasNormals && !normalsInterp) {
+    const idxCount = normalsIndices?.length ?? 0;
+    if (idxCount === 1) normalsInterp = 'constant';
+    else if (idxCount === numVerts) normalsInterp = 'vertex';
+    else if (idxCount === faceVertexIndices.length) normalsInterp = 'faceVarying';
+    else if (idxCount === faceVertexCounts.length) normalsInterp = 'uniform';
+    else {
+      // Fallback heuristic based on the authored normal element count (unindexed case).
+      const nCount = normals.length / 3;
+      if (nCount === 1) normalsInterp = 'constant';
+      else if (nCount === numVerts) normalsInterp = 'vertex';
+      else if (nCount === faceVertexIndices.length) normalsInterp = 'faceVarying';
+      else if (nCount === faceVertexCounts.length) normalsInterp = 'uniform';
+    }
   }
+
+  // For polygonal (non-subdiv) meshes, many assets expect hard edges.
+  // If normals are missing we generate flat normals.
+  // If normals are authored as vertex-interpolated on a polygonal mesh, they often produce
+  // overly-smooth shading (typical exporter behavior for hard-surface assets). In that case,
+  // prefer recomputing flat normals.
+  const forceFlatNormals = subdivisionScheme === 'none' && hasNormals && normalsInterp === 'vertex';
+  const useAuthoredNormals = hasNormals && !forceFlatNormals;
+  const wantFlatNormals = subdivisionScheme === 'none' && (!hasNormals || forceFlatNormals);
 
   const vtxColor = displayColor ?? colors;
   let vtxColorInterp = displayColor ? displayColorInterp : colorsInterp;
@@ -2039,17 +2214,26 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
   // Trade-off: per-face/per-corner colors are lost when subdivision is applied.
   const needsDeindex =
     !shouldSubdivide && (
+      wantFlatNormals ||
       (vtxColor && (vtxColorInterp === 'faceVarying' || vtxColorInterp === 'uniform')) ||
-      (normals && (normalsInterp === 'faceVarying' || normalsInterp === 'uniform')) ||
+      (useAuthoredNormals && (normalsInterp === 'faceVarying' || normalsInterp === 'uniform')) ||
       (st && stInterp === 'faceVarying')
     );
 
   // If displayColor or normals are per-corner/per-face, we need to de-index.
   if (needsDeindex) {
+    // Record a mapping from USD "face index" -> (triangle start, triangle count) in the *final*
+    // triangulated geometry. This is required to apply UsdGeomSubset face indices as Three.js groups.
+    //
+    // Note: USD GeomSubset indices are "face indices" (not faceVertexIndices indices, and not triangle indices).
+    // After triangulation, each face becomes 1+ triangles; we keep a compact mapping so subsets can be applied.
+    const usdFaceTriStart = new Uint32Array(faceVertexCounts.length);
+    const usdFaceTriCount = new Uint32Array(faceVertexCounts.length);
+
     const vCount = numTris * 3;
     const pos = new Float32Array(vCount * 3);
     const col = vtxColor ? new Float32Array(vCount * 3) : null;
-    const nor = normals ? new Float32Array(vCount * 3) : null;
+    const nor = useAuthoredNormals ? new Float32Array(vCount * 3) : null;
     const uv = st ? new Float32Array(vCount * 2) : null;
     // Track original point index for each de-indexed vertex (needed for skinning)
     const originalPointIndex = new Uint32Array(vCount);
@@ -2057,6 +2241,7 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
     let idxRead = 0; // faceVertexIndices cursor (also the faceVarying element cursor)
     let vWrite = 0;
     let faceIdx = 0;
+    let triWrite = 0; // triangle cursor in the final triangulated stream
 
     const triangulateFaceLocal = (polyPoints: number[]): number[] => {
       // polyPoints are global point indices in face-vertex order.
@@ -2151,6 +2336,8 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
     for (const c of faceVertexCounts) {
       const n = c | 0;
       if (n < 3) {
+        usdFaceTriStart[faceIdx] = triWrite;
+        usdFaceTriCount[faceIdx] = 0;
         idxRead += Math.max(0, n);
         faceIdx++;
         continue;
@@ -2159,6 +2346,7 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
       const faceCornerPoints: number[] = new Array(n);
       for (let i = 0; i < n; i++) faceCornerPoints[i] = faceVertexIndices[idxRead + i]!;
       const triLocal = triangulateFaceLocal(faceCornerPoints);
+      const faceTriStart = triWrite;
 
       const writeVertex = (pointIndex: number, fvIndex: number) => {
         const pOff = pointIndex * 3;
@@ -2188,7 +2376,7 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
           col[vWrite * 3 + 2] = vtxColor[cOff + 2] ?? 1;
         }
 
-        if (normals && nor) {
+        if (useAuthoredNormals && normals && nor) {
           let nIdx: number | null = null;
           if (normalsInterp === 'vertex') nIdx = pointIndex;
           else if (normalsInterp === 'faceVarying') nIdx = fvIndex;
@@ -2228,6 +2416,7 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
           writeVertex(faceCornerPoints[a]!, idxRead + a);
           writeVertex(faceCornerPoints[b]!, idxRead + b);
           writeVertex(faceCornerPoints[c]!, idxRead + c);
+          triWrite++;
         }
       } else {
         // Fallback: fan triangulation (may be incorrect for concave faces)
@@ -2241,9 +2430,12 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
           writeVertex(corner0Point, fv0);
           writeVertex(corner1Point, fv1);
           writeVertex(corner2Point, fv2);
+          triWrite++;
         }
       }
 
+      usdFaceTriStart[faceIdx] = faceTriStart;
+      usdFaceTriCount[faceIdx] = triWrite - faceTriStart;
       idxRead += n;
       faceIdx++;
     }
@@ -2255,6 +2447,14 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
     if (uv) geom.setAttribute('uv', new THREE.BufferAttribute(uv, 2));
     // Store original point indices for skinning (vertex-interpolated attributes)
     geom.setAttribute('_originalPointIndex', new THREE.BufferAttribute(originalPointIndex, 1));
+    // Store face->triangle mapping for GeomSubset material application.
+    (geom as any).userData = {
+      ...(geom as any).userData,
+      usdFaceTriStart,
+      usdFaceTriCount,
+      usdTriangleCount: triWrite,
+      usdFaceCount: faceVertexCounts.length,
+    };
 
     // Track if we have authored normals (needed for leftHanded flip decision)
     const hasAuthoredNormals = !!nor;
@@ -2262,7 +2462,10 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
     // Compute smooth normals if not authored.
     // Use computeSmoothNormalsDeindexed to get smooth shading by averaging
     // face normals for vertices that share the same original point.
-    if (!nor) computeSmoothNormalsDeindexed(geom);
+    if (!nor) {
+      if (wantFlatNormals) geom.computeVertexNormals();
+      else computeSmoothNormalsDeindexed(geom);
+    }
     geom.computeBoundingSphere();
 
     // Apply subdivision surface if specified (catmullClark or loop)
@@ -2282,7 +2485,7 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
       return subdivided;
     }
     // Recompute normals after flip only if they weren't authored
-    if (isLeftHanded) flipGeometryWinding(geom, !hasAuthoredNormals);
+    if (isLeftHanded) flipGeometryWinding(geom, !hasAuthoredNormals, !wantFlatNormals);
     return geom;
   }
 
@@ -2291,6 +2494,10 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
   // triangles ("extra triangle" / z-fighting). Use Earcut via THREE.ShapeUtils for n-gons.
   const indicesOut: number[] = [];
   let idxRead = 0;
+  // Record USD face index -> triangulated triangle range mapping (see de-indexed path above).
+  const usdFaceTriStart = new Uint32Array(faceVertexCounts.length);
+  const usdFaceTriCount = new Uint32Array(faceVertexCounts.length);
+  let faceIdx = 0;
 
   const triangulatePolygon = (poly: number[]): number[] => {
     // Compute a stable projection plane for this polygon using Newell's method.
@@ -2379,16 +2586,23 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
   for (const c of faceVertexCounts) {
     const n = c | 0;
     if (n < 3) {
+      usdFaceTriStart[faceIdx] = (indicesOut.length / 3) | 0;
+      usdFaceTriCount[faceIdx] = 0;
       idxRead += Math.max(0, n);
+      faceIdx++;
       continue;
     }
 
+    const faceTriStart = (indicesOut.length / 3) | 0;
     if (n === 3) {
       const i0 = faceVertexIndices[idxRead + 0]!;
       const i1 = faceVertexIndices[idxRead + 1]!;
       const i2 = faceVertexIndices[idxRead + 2]!;
       indicesOut.push(i0, i1, i2);
       idxRead += 3;
+      usdFaceTriStart[faceIdx] = faceTriStart;
+      usdFaceTriCount[faceIdx] = 1;
+      faceIdx++;
       continue;
     }
 
@@ -2405,11 +2619,21 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
     }
 
     idxRead += n;
+    usdFaceTriStart[faceIdx] = faceTriStart;
+    usdFaceTriCount[faceIdx] = ((indicesOut.length / 3) | 0) - faceTriStart;
+    faceIdx++;
   }
 
   const geom = new THREE.BufferGeometry();
   geom.setAttribute('position', new THREE.BufferAttribute(points, 3));
   geom.setIndex(new THREE.BufferAttribute(new Uint32Array(indicesOut), 1));
+  (geom as any).userData = {
+    ...(geom as any).userData,
+    usdFaceTriStart,
+    usdFaceTriCount,
+    usdTriangleCount: (indicesOut.length / 3) | 0,
+    usdFaceCount: faceVertexCounts.length,
+  };
 
   // Attach vertex colors per point (keep indices) when interpolation allows it.
   // - vertex: per point
@@ -2441,7 +2665,7 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
   // If normals are vertex-interpolated and match point count, attach them directly.
   // Track if we have authored normals (needed for leftHanded flip decision)
   let hasAuthoredNormals = false;
-  if (normals && normalsInterp === 'vertex' && normals.length === points.length) {
+  if (useAuthoredNormals && normalsInterp === 'vertex' && normals.length === points.length) {
     const out = new Float32Array(points.length);
     for (let i = 0; i < numVerts; i++) {
       const src = normalsIndices ? normalsIndices[i] ?? i : i;
@@ -2519,27 +2743,63 @@ function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: number) {
     ? (name: string) => getPrimPropAtTime(prim, name, time)
     : (name: string) => getPrimProp(prim, name);
 
-  // Check for custom xformOp:transform (matrix4d) first
-  const transformMatrix = parseMatrix4d(getVal('xformOp:transform'));
-  if (transformMatrix) {
-    // Decompose the matrix into position, quaternion, scale
+  // Prefer matrix transform ops when present.
+  // Many real-world USDs author matrix ops with a suffix (e.g. `xformOp:transform:edit7`)
+  // and list them in `xformOpOrder`. If we only look for the unsuffixed `xformOp:transform`,
+  // transforms are silently ignored (e.g. all wheels stack at origin and look like "one wheel").
+  const readXformOpOrder = (): string[] => {
+    const dv: any = getVal('xformOpOrder');
+    if (!dv || typeof dv !== 'object' || dv.type !== 'array' || !Array.isArray(dv.value)) return [];
+    const out: string[] = [];
+    for (const el of dv.value) {
+      if (typeof el === 'string') out.push(el);
+      else if (el && typeof el === 'object' && el.type === 'token' && typeof el.value === 'string') out.push(el.value);
+    }
+    return out;
+  };
+
+  const tryApplyMatrixOp = (opName: string): boolean => {
+    const m = parseMatrix4d(getVal(opName));
+    if (!m) return false;
     const pos = new THREE.Vector3();
     const quat = new THREE.Quaternion();
     const scale = new THREE.Vector3();
-    transformMatrix.decompose(pos, quat, scale);
-
+    m.decompose(pos, quat, scale);
     obj.position.copy(pos);
     obj.quaternion.copy(quat);
     obj.scale.copy(scale);
-    return;
+    return true;
+  };
+
+  const order = readXformOpOrder();
+  for (const opName of order) {
+    if (opName.startsWith('xformOp:transform') && tryApplyMatrixOp(opName)) return;
+  }
+
+  // Fallback: try any authored xformOp:transform* even if xformOpOrder is missing.
+  if (tryApplyMatrixOp('xformOp:transform')) return;
+  if (prim.properties) {
+    for (const k of prim.properties.keys()) {
+      if (k.startsWith('xformOp:transform') && tryApplyMatrixOp(k)) return;
+    }
   }
 
   // Fallback: apply translate, rotate, scale in Three.js default order (T * R * S)
   // Note: USD xformOpOrder can specify different orders, but Three.js always uses T * R * S
   // For most USD files, this matches the common ["xformOp:translate", "xformOp:rotateXYZ", "xformOp:scale"] order
-  const t = sdfToNumberTuple(getVal('xformOp:translate'), 3);
-  const r = sdfToNumberTuple(getVal('xformOp:rotateXYZ'), 3);
-  const s = sdfToNumberTuple(getVal('xformOp:scale'), 3);
+  // Support suffixed ops too (e.g. `xformOp:translate:foo`) by consulting xformOpOrder first.
+  const findOpName = (prefix: string, fallback: string): string => {
+    for (const opName of order) if (opName.startsWith(prefix)) return opName;
+    return fallback;
+  };
+
+  const tName = findOpName('xformOp:translate', 'xformOp:translate');
+  const rName = findOpName('xformOp:rotateXYZ', 'xformOp:rotateXYZ');
+  const sName = findOpName('xformOp:scale', 'xformOp:scale');
+
+  const t = sdfToNumberTuple(getVal(tName), 3);
+  const r = sdfToNumberTuple(getVal(rName), 3);
+  const s = sdfToNumberTuple(getVal(sName), 3);
 
   if (t) obj.position.set(t[0]!, t[1]!, t[2]!);
   if (r) obj.rotation.set(THREE.MathUtils.degToRad(r[0]!), THREE.MathUtils.degToRad(r[1]!), THREE.MathUtils.degToRad(r[2]!));
@@ -2550,12 +2810,21 @@ function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: number) {
  * Check if a prim has any animated xform properties
  */
 function primHasAnimatedXform(prim: SdfPrimSpec): boolean {
-  return (
+  if (
     propHasAnimation(prim, 'xformOp:translate') ||
     propHasAnimation(prim, 'xformOp:rotateXYZ') ||
     propHasAnimation(prim, 'xformOp:scale') ||
     propHasAnimation(prim, 'xformOp:transform')
-  );
+  ) return true;
+
+  // Also catch suffixed matrix ops like `xformOp:transform:edit7`
+  if (prim.properties) {
+    for (const [k, spec] of prim.properties.entries()) {
+      if (!k.startsWith('xformOp:transform')) continue;
+      if (spec.timeSamples && spec.timeSamples.size > 0) return true;
+    }
+  }
+  return false;
 }
 
 function extractAssetStrings(v: any): string[] {
@@ -2826,7 +3095,12 @@ function renderPrim(
     console.log(`[Mesh] Rendering mesh: ${node.path}, prototypeRootForMaterials=${prototypeRootForMaterials?.path?.primPath}`);
     const mat = resolveMaterial(node.prim);
     applySidedness(node.prim, mat);
-    const hasBoundMaterial = !!resolveMaterialBinding(node.prim, rootPrim, bindingRootForMaterials);
+    // USD commonly binds materials via GeomSubsets (per-face material assignment). In that case, the Mesh itself
+    // often has no `material:binding`, and we should not fall back to default gray / displayColor-only rendering.
+    const subsetChildren = Array.from(node.prim.children?.values?.() ?? []).filter((c) => c?.typeName === 'GeomSubset');
+    const hasGeomSubsetBindings = subsetChildren.some((s) => !!resolveMaterialBinding(s, rootPrim, bindingRootForMaterials));
+
+    const hasBoundMaterial = !!resolveMaterialBinding(node.prim, rootPrim, bindingRootForMaterials) || hasGeomSubsetBindings;
     console.log(`[Mesh] ${node.path}: hasBoundMaterial=${hasBoundMaterial}, mat.color=${(mat as any).color?.getHexString?.()}, mat.vertexColors=${(mat as any).vertexColors}`);
     if (!hasBoundMaterial) {
       // Viewer fallback for meshes with no bound material and no authored displayColor.
@@ -3152,8 +3426,127 @@ function renderPrim(
           container.add(mesh);
         }
       } else {
-        // Regular mesh without skinning
-        const mesh = new THREE.Mesh(realGeom, mat);
+        // Regular mesh without skinning. Apply GeomSubset material bindings (USD's per-face materials)
+        // when present by creating geometry groups + a multi-material array.
+        const applyGeomSubsetMaterials = (): { materials: THREE.Material[]; didApply: boolean } => {
+          const subsets = Array.from(node.prim.children?.values?.() ?? []).filter((c) => c?.typeName === 'GeomSubset');
+          if (subsets.length === 0) return { materials: [mat], didApply: false };
+
+          const usdFaceTriStart: any = (realGeom as any).userData?.usdFaceTriStart;
+          const usdFaceTriCount: any = (realGeom as any).userData?.usdFaceTriCount;
+          const usdTriangleCount: number | undefined = (realGeom as any).userData?.usdTriangleCount;
+          const usdFaceCount: number | undefined = (realGeom as any).userData?.usdFaceCount;
+          if (!usdFaceTriStart || !usdFaceTriCount || typeof usdTriangleCount !== 'number' || typeof usdFaceCount !== 'number') {
+            return { materials: [mat], didApply: false };
+          }
+
+          type SubsetInfo = { prim: SdfPrimSpec; faceIndices: number[]; material: THREE.Material };
+          const picked: SubsetInfo[] = [];
+          for (const s of subsets) {
+            // elementType should be "face"
+            const et: any = getPrimProp(s, 'elementType');
+            const etVal = typeof et === 'string' ? et : (et && typeof et === 'object' && et.type === 'token' ? et.value : null);
+            if (etVal && etVal !== 'face') continue;
+
+            const idx = parseNumberArray(getPrimProp(s, 'indices'));
+            if (!idx || idx.length === 0) continue;
+
+            // Must have a resolvable material binding
+            const bound = resolveMaterialBinding(s, rootPrim, bindingRootForMaterials);
+            if (!bound) continue;
+
+            const smat = resolveMaterial(s);
+            applySidedness(node.prim, smat);
+            picked.push({ prim: s, faceIndices: idx, material: smat });
+          }
+          if (picked.length === 0) return { materials: [mat], didApply: false };
+
+          // Build groups based on USD face indices -> triangulated triangle ranges.
+          const triCount = usdTriangleCount | 0;
+          const covered = new Uint8Array(triCount);
+          const materials: THREE.Material[] = [mat, ...picked.map((p) => p.material)];
+          realGeom.clearGroups();
+
+          const getStart = (f: number): number => {
+            // handle both typed arrays and JS arrays
+            return (usdFaceTriStart[f] ?? 0) | 0;
+          };
+          const getCount = (f: number): number => {
+            return (usdFaceTriCount[f] ?? 0) | 0;
+          };
+
+          const addFaceRuns = (faces: number[], materialIndex: number) => {
+            const sortedFaces = Array.from(new Set(faces.map((x) => x | 0))).filter((f) => f >= 0 && f < usdFaceCount).sort((a, b) => a - b);
+            let runStart = -1;
+            let runCount = 0;
+            let runEnd = -1; // exclusive end (triangle index)
+
+            for (const f of sortedFaces) {
+              const s = getStart(f);
+              const c = getCount(f);
+              if (c <= 0) continue;
+              if (s < 0 || s >= triCount) continue;
+              const e = Math.min(triCount, s + c);
+              const cc = e - s;
+              if (cc <= 0) continue;
+
+              if (runStart < 0) {
+                runStart = s;
+                runCount = cc;
+                runEnd = s + cc;
+              } else if (s === runEnd) {
+                runCount += cc;
+                runEnd += cc;
+              } else {
+                realGeom.addGroup(runStart * 3, runCount * 3, materialIndex);
+                runStart = s;
+                runCount = cc;
+                runEnd = s + cc;
+              }
+            }
+
+            if (runStart >= 0 && runCount > 0) {
+              realGeom.addGroup(runStart * 3, runCount * 3, materialIndex);
+            }
+          };
+
+          // Add subset groups
+          for (let i = 0; i < picked.length; i++) {
+            const faces = picked[i]!.faceIndices;
+            for (const f0 of faces) {
+              const f = f0 | 0;
+              if (f < 0 || f >= usdFaceCount) continue;
+              const s = getStart(f);
+              const c = getCount(f);
+              if (c <= 0) continue;
+              const e = Math.min(triCount, s + c);
+              for (let t = s; t < e; t++) covered[t] = 1;
+            }
+            addFaceRuns(faces, /* materialIndex */ i + 1);
+          }
+
+          // Add fallback group for uncovered faces (materialIndex 0)
+          // Create contiguous runs over the triangle stream.
+          let runStart = -1;
+          for (let t = 0; t < triCount; t++) {
+            if (covered[t]) {
+              if (runStart >= 0) {
+                realGeom.addGroup(runStart * 3, (t - runStart) * 3, 0);
+                runStart = -1;
+              }
+            } else if (runStart < 0) {
+              runStart = t;
+            }
+          }
+          if (runStart >= 0) {
+            realGeom.addGroup(runStart * 3, (triCount - runStart) * 3, 0);
+          }
+
+          return { materials, didApply: true };
+        };
+
+        const subsetApplied = applyGeomSubsetMaterials();
+        const mesh = new THREE.Mesh(realGeom, subsetApplied.materials);
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         container.add(mesh);
@@ -4357,6 +4750,30 @@ export function createViewerCore(opts: {
   onStatus: (msg: string) => void;
   onTree: (nodes: PrimeTreeNode[], selectedPath: string | null) => void;
 }): ViewerCore {
+  // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+  // Keep logs throttled so huge scenes don't spam the console.
+  const USDDEBUG =
+    (() => {
+      try {
+        const q = new URLSearchParams(window.location.search ?? '');
+        if (q.get('usddebug') === '1') return true;
+        if (localStorage.getItem('usddebug') === '1') return true;
+      } catch {
+        // ignore
+      }
+      return false;
+    })();
+  const dbg = (...args: any[]) => {
+    if (!USDDEBUG) return;
+    // Use console.log (not console.debug) so it shows up even when DevTools filters out "Verbose".
+    // eslint-disable-next-line no-console
+    console.log('[usdjs-viewer]', ...args);
+  };
+  if (USDDEBUG) {
+    // eslint-disable-next-line no-console
+    console.log('[usdjs-viewer] debug enabled (usddebug=1)');
+  }
+
   const LS_KEY_LAST_STATE = 'usdjs-viewer:lastState:v1';
   type LastViewerState = {
     entryKey?: string;
@@ -4737,9 +5154,31 @@ export function createViewerCore(opts: {
   }
 
   function makeResolver() {
+    const textCache = new Map<string, { identifier: string; text: string }>();
+    const readHits = new Map<string, number>();
     return {
       async readText(assetPath: string, fromIdentifier?: string) {
-        const resolved = resolveAssetPath(assetPath, fromIdentifier);
+        // Important: corpus entries are keyed as `[corpus]...` in the viewer, but the USD resolver
+        // should operate on the real path. If we keep `[corpus]` in the identifier, resolveAssetPath()
+        // will produce unstable/incorrect results and composition may repeatedly reload the same layer
+        // under different identifiers (breaking expandArcsInLayer cycle guards).
+        const fromId =
+          typeof fromIdentifier === 'string' && fromIdentifier.startsWith('[corpus]')
+            ? fromIdentifier.replace('[corpus]', '')
+            : fromIdentifier;
+
+        const resolved = resolveAssetPath(assetPath, fromId);
+
+        // Fast path: avoid repeated string lookups / parsing cascades for the same layer
+        const cached = textCache.get(resolved);
+        if (cached) return cached;
+
+        // Debug: track resolver churn (re-reading same resolved path is a strong signal of a loop)
+        const n = (readHits.get(resolved) ?? 0) + 1;
+        readHits.set(resolved, n);
+        if (n === 1 || n === 2 || n === 5 || n === 10 || n % 25 === 0) {
+          dbg('readText', { n, assetPath, fromIdentifier, fromId, resolved });
+        }
 
         // Check if it's an external URL (http:// or https://)
         const isExternalUrl = resolved.match(/^https?:\/\//);
@@ -4827,10 +5266,20 @@ export function createViewerCore(opts: {
         }
 
         // For local/corpus files, check our externalFiles map
-        const exact = externalFiles.get(resolved);
-        if (exact) return { identifier: resolved, text: exact.text };
+        // Try exact matches for both raw and `[corpus]`-prefixed keys.
+        const exact = externalFiles.get(resolved) ?? externalFiles.get(`[corpus]${resolved}`);
+        if (exact) {
+          const out = { identifier: resolved, text: exact.text };
+          textCache.set(resolved, out);
+          return out;
+        }
         for (const [k, v] of externalFiles.entries()) {
-          if (k.endsWith('/' + resolved) || k.endsWith(resolved)) return { identifier: k, text: v.text };
+          // Be tolerant of corpus prefix and varying absolute-ish identifiers.
+          if (k.endsWith('/' + resolved) || k.endsWith(resolved) || k.endsWith(`/[corpus]${resolved}`) || k.endsWith(`[corpus]${resolved}`)) {
+            const out = { identifier: resolved, text: v.text };
+            textCache.set(resolved, out);
+            return out;
+          }
         }
 
         // Only throw errors for local files that should exist
@@ -5320,6 +5769,16 @@ void main() {
 
   async function run() {
     try {
+      // Prevent accidental re-entrancy (e.g. UI events firing while a heavy compose is still running).
+      // Without this, big corpus scenes can look like an "infinite loop" because we keep starting over.
+      if ((run as any)._running) {
+        (run as any)._rerun = true;
+        dbg('run re-entered -> coalescing rerun');
+        return;
+      }
+      (run as any)._running = true;
+      const tRun0 = performance.now();
+      dbg('run start', { entryKey, compose, selectedPath });
       opts.onStatus('Parsing…');
       const resolver = makeResolver();
 
@@ -5328,10 +5787,12 @@ void main() {
 
       let stage: UsdStage;
       try {
+        const t0 = performance.now();
         stage =
           entryKey === '<textarea>'
             ? UsdStage.openUSDA(entryText, entryId)
             : await UsdStage.openUSDAWithResolver(entryText, resolver, entryId);
+        dbg('stage open ok', { ms: +(performance.now() - t0).toFixed(1), entryId });
       } catch (err) {
         // If composition fails due to invalid external references, log and continue
         // This allows the scene to render even if some external assets are invalid
@@ -5347,7 +5808,16 @@ void main() {
         ? stage.rootLayer.identifier.replace('[corpus]', '')
         : stage.rootLayer.identifier;
 
-      const rootLayerToRender = compose ? await stage.composePrimIndexWithResolver(resolver) : stage.rootLayer;
+      let rootLayerToRender: any;
+      if (compose) {
+        const t0 = performance.now();
+        opts.onStatus('Composing…');
+        dbg('compose start');
+        rootLayerToRender = await stage.composePrimIndexWithResolver(resolver);
+        dbg('compose done', { ms: +(performance.now() - t0).toFixed(1) });
+      } else {
+        rootLayerToRender = stage.rootLayer;
+      }
 
       // Important: some composition paths may return a "composed" layer that doesn't carry the
       // original root layer's metadata/customLayerData. Camera/render settings are typically authored
@@ -5401,9 +5871,15 @@ void main() {
       const stageEndTime = layerForSettings?.metadata?.endTimeCode;
       const stageFps = layerForSettings?.metadata?.timeCodesPerSecond ?? layerForSettings?.metadata?.framesPerSecond;
 
-      if (typeof stageStartTime === 'number' && typeof stageEndTime === 'number') {
-        animationStartTime = stageStartTime;
-        animationEndTime = stageEndTime;
+      // Prefer authored stage range when it is meaningful (non-degenerate).
+      // Some real-world samples (including usd-wg-assets teapotScene) author start=end=1 while still having
+      // real animated timeSamples in referenced layers; in that case we should derive the range from animation data.
+      const hasStageRange = typeof stageStartTime === 'number' && typeof stageEndTime === 'number';
+      const stageRangeIsMeaningful = hasStageRange && stageEndTime > stageStartTime;
+
+      if (stageRangeIsMeaningful) {
+        animationStartTime = stageStartTime as number;
+        animationEndTime = stageEndTime as number;
       } else if (animatedObjects.length > 0) {
         // Scan animated objects for time range
         let minTime = Infinity;
@@ -5419,6 +5895,10 @@ void main() {
           animationStartTime = minTime;
           animationEndTime = maxTime;
         }
+      } else if (hasStageRange) {
+        // Fallback: use authored stage range even if degenerate (some files are intentionally single-frame).
+        animationStartTime = stageStartTime as number;
+        animationEndTime = stageEndTime as number;
       }
 
       if (typeof stageFps === 'number' && stageFps > 0) {
@@ -5449,6 +5929,7 @@ void main() {
 
       const primCount = compose ? listPrimCount(rootLayerToRender.root) : stage.listPrimPaths().length;
       opts.onStatus(`OK: prims=${primCount}`);
+      dbg('run ok', { ms: +(performance.now() - tRun0).toFixed(1), primCount });
 
       // If no authored camera settings, auto-frame to fit content
       if (!hasAuthoredCamera) {
@@ -5470,6 +5951,14 @@ void main() {
     } catch (e) {
       opts.onStatus(String((e as any)?.message ?? e));
       console.error(e);
+    } finally {
+      (run as any)._running = false;
+      if ((run as any)._rerun) {
+        (run as any)._rerun = false;
+        // Fire-and-forget: if multiple triggers arrived while running, we coalesce into one rerun.
+        dbg('run rerun firing');
+        void run();
+      }
     }
   }
 

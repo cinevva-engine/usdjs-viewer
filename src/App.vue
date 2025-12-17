@@ -228,6 +228,10 @@ function nextSample() {
 
 const treeNodes = ref<PrimeTreeNode[]>([]);
 const selectionKeys = ref<Record<string, boolean>>({});
+// Guard against PrimeVue Tree emitting node-select events when we programmatically
+// update selectionKeys in onTree(). Without this, some large stages can trigger
+// an accidental run() -> onTree() -> node-select -> run() loop.
+const lastSelectedPath = ref<string | null>(null);
 const referenceImageUrl = ref<string | null>(null);
 
 // Animation state
@@ -375,7 +379,11 @@ async function loadCorpus() {
 function onNodeSelect(e: any) {
   const node: PrimeTreeNode | undefined = e?.node;
   if (!node) return;
-  void core.value?.setSelectedPath(node.data?.path ?? null).then(() => run());
+  const nextPath: string | null = node.data?.path ?? null;
+  // If the selection didn't actually change, don't re-run (prevents feedback loops).
+  if (nextPath === lastSelectedPath.value) return;
+  lastSelectedPath.value = nextPath;
+  void core.value?.setSelectedPath(nextPath).then(() => run());
 }
 
 function cDefaultUsda() {
@@ -404,6 +412,7 @@ onMounted(async () => {
       treeNodes.value = nodes;
       // Keep selection in sync
       selectionKeys.value = selectedPath ? { [selectedPath]: true } : {};
+      lastSelectedPath.value = selectedPath ?? null;
     },
   });
   core.value = c;
