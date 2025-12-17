@@ -1,0 +1,29 @@
+{
+    "name": "@cinevva/usdjs-viewer",
+    "version": "0.0.1",
+    "private": true,
+    "type": "module",
+    "description": "Detached browser viewer for @cinevva/usdjs (Three.js-based).",
+    "license": "MIT",
+    "scripts": {
+        "dev": "vite",
+        "build": "vite build",
+        "preview": "vite preview"
+    },
+    "dependencies": {
+        "@cinevva/usdjs": "file:../usdjs",
+        "@primeuix/themes": "^1.2.2",
+        "monaco-editor": "^0.45.0",
+        "primeflex": "^3.3.1",
+        "primeicons": "^7.0.0",
+        "primevue": "^4.4.1",
+        "three": "^0.182.0",
+        "three-subdivide": "^1.1.3",
+        "vue": "^3.5.0"
+    },
+    "devDependencies": {
+        "@vitejs/plugin-vue": "^6.0.1",
+        "typescript": "^5.9.3",
+        "vite": "^6.0.0"
+    }
+}
