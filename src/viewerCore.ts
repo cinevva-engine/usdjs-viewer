@@ -875,6 +875,18 @@ function extractOmniPbrInputs(shader: SdfPrimSpec): {
 } {
   const result: any = {};
 
+  const getAssetPath = (name: string): string | undefined => {
+    const prop = shader.properties?.get(name);
+    const dv: any = prop?.defaultValue;
+    // Some layers serialize asset paths as plain strings; support both.
+    if (typeof dv === 'string') return dv;
+    if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') return dv.value;
+    // usdjs may parse `@path@`-style authored values as a 'reference' SdfValue (with extra metadata fields).
+    // OmniPBR MDL inputs frequently use this encoding.
+    if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') return dv.assetPath;
+    return undefined;
+  };
+
   const getColor3f = (name: string): THREE.Color | undefined => {
     const prop = shader.properties?.get(name);
     const dv: any = prop?.defaultValue;
@@ -902,22 +914,19 @@ function extractOmniPbrInputs(shader: SdfPrimSpec): {
   };
 
   result.diffuseColor = getColor3f('inputs:diffuse_color_constant');
-  const dt = shader.properties?.get('inputs:diffuse_texture')?.defaultValue;
-  if (dt && typeof dt === 'object' && dt.type === 'asset' && typeof dt.value === 'string') result.diffuseTexture = dt.value;
+  result.diffuseTexture = getAssetPath('inputs:diffuse_texture');
   result.diffuseTint = getColor3f('inputs:diffuse_tint');
   result.roughness = getFloat('inputs:reflection_roughness_constant');
   result.specularLevel = getFloat('inputs:specular_level');
   result.emissiveColor = getColor3f('inputs:emissive_color');
-  const ect = shader.properties?.get('inputs:emissive_color_texture')?.defaultValue;
-  if (ect && typeof ect === 'object' && ect.type === 'asset' && typeof ect.value === 'string') result.emissiveColorTexture = ect.value;
+  result.emissiveColorTexture = getAssetPath('inputs:emissive_color_texture');
   result.emissiveIntensity = getFloat('inputs:emissive_intensity');
   result.enableEmission = getBool('inputs:enable_emission');
 
   result.enableOpacity = getBool('inputs:enable_opacity');
   result.opacityConstant = getFloat('inputs:opacity_constant');
   result.enableOpacityTexture = getBool('inputs:enable_opacity_texture');
-  const ot = shader.properties?.get('inputs:opacity_texture')?.defaultValue;
-  if (ot && typeof ot === 'object' && ot.type === 'asset' && typeof ot.value === 'string') result.opacityTexture = ot.value;
+  result.opacityTexture = getAssetPath('inputs:opacity_texture');
   result.opacityThreshold = getFloat('inputs:opacity_threshold');
   result.opacityMode = getFloat('inputs:opacity_mode');
 
@@ -1733,10 +1742,34 @@ uniform vec3 usdNormalBias;`
     // Albedo map (the "multiply texture" samples use a diffuse texture and a tint multiplier)
     if (inputs.diffuseTexture && resolveAssetUrl) {
       const url = resolveAssetUrl(inputs.diffuseTexture);
+      // Debug: OmniPBR texture resolution
+      try {
+        const q = new URLSearchParams((window as any)?.location?.search ?? '');
+        const USDDEBUG = q.get('usddebug') === '1' || (window as any)?.localStorage?.getItem?.('usddebug') === '1';
+        if (USDDEBUG) {
+          // eslint-disable-next-line no-console
+          console.log('[usdjs-viewer][OmniPBR] diffuse_texture', {
+            shader: shader.path?.primPath,
+            asset: inputs.diffuseTexture,
+            url,
+          });
+        }
+      } catch {
+        // ignore
+      }
       if (url) {
-        const tex = new THREE.TextureLoader().load(url);
-        tex.colorSpace = THREE.SRGBColorSpace;
-        mat.map = tex;
+        new THREE.TextureLoader().load(
+          url,
+          (tex: any) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            mat.map = tex;
+            mat.needsUpdate = true;
+          },
+          undefined,
+          (err: unknown) => {
+            console.error('Failed to load OmniPBR diffuse texture:', inputs.diffuseTexture, url, err);
+          },
+        );
       }
     }
 
@@ -1750,10 +1783,33 @@ uniform vec3 usdNormalBias;`
 
       if (inputs.emissiveColorTexture && resolveAssetUrl) {
         const url = resolveAssetUrl(inputs.emissiveColorTexture);
+        try {
+          const q = new URLSearchParams((window as any)?.location?.search ?? '');
+          const USDDEBUG = q.get('usddebug') === '1' || (window as any)?.localStorage?.getItem?.('usddebug') === '1';
+          if (USDDEBUG) {
+            // eslint-disable-next-line no-console
+            console.log('[usdjs-viewer][OmniPBR] emissive_color_texture', {
+              shader: shader.path?.primPath,
+              asset: inputs.emissiveColorTexture,
+              url,
+            });
+          }
+        } catch {
+          // ignore
+        }
         if (url) {
-          const tex = new THREE.TextureLoader().load(url);
-          tex.colorSpace = THREE.SRGBColorSpace;
-          mat.emissiveMap = tex;
+          new THREE.TextureLoader().load(
+            url,
+            (tex: any) => {
+              tex.colorSpace = THREE.SRGBColorSpace;
+              mat.emissiveMap = tex;
+              mat.needsUpdate = true;
+            },
+            undefined,
+            (err: unknown) => {
+              console.error('Failed to load OmniPBR emissive texture:', inputs.emissiveColorTexture, url, err);
+            },
+          );
         }
       }
 
@@ -2257,14 +2313,14 @@ function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.BufferG
     }
   }
 
-  // For polygonal (non-subdiv) meshes, many assets expect hard edges.
-  // If normals are missing we generate flat normals.
-  // If normals are authored as vertex-interpolated on a polygonal mesh, they often produce
-  // overly-smooth shading (typical exporter behavior for hard-surface assets). In that case,
-  // prefer recomputing flat normals.
-  const forceFlatNormals = subdivisionScheme === 'none' && hasNormals && normalsInterp === 'vertex';
-  const useAuthoredNormals = hasNormals && !forceFlatNormals;
-  const wantFlatNormals = subdivisionScheme === 'none' && (!hasNormals || forceFlatNormals);
+  // Normal handling:
+  // - If normals are authored, prefer them. USD assets (including ft-lab samples) often rely on authored
+  //   vertex normals for smooth shading even when `subdivisionScheme = "none"`.
+  // - If normals are missing and subdivision is off, fall back to flat normals.
+  //   (When we de-index geometry, computeVertexNormals() becomes per-face; for smooth shading we use
+  //   computeSmoothNormalsDeindexed() in the non-flat case.)
+  const useAuthoredNormals = hasNormals;
+  const wantFlatNormals = subdivisionScheme === 'none' && !hasNormals;
 
   const vtxColor = displayColor ?? colors;
   let vtxColorInterp = displayColor ? displayColorInterp : colorsInterp;
@@ -5446,9 +5502,34 @@ export function createViewerCore(opts: {
       if (assetPath.match(/^https?:\/\//)) {
         return `/__usdjs_proxy?url=${encodeURIComponent(assetPath)}`;
       }
-      // Use the provided identifier, or fall back to currentIdentifier
-      const identifier = fromIdentifier ?? currentIdentifier;
-      const resolved = resolveAssetPath(assetPath, identifier);
+      // Use the provided identifier, or fall back to currentIdentifier.
+      // Important: viewer "corpus" entries often prefix identifiers with `[corpus]`,
+      // but USD asset resolution should operate on the real underlying path.
+      const rawIdentifier = fromIdentifier ?? currentIdentifier;
+      const identifier =
+        typeof rawIdentifier === 'string' && rawIdentifier.startsWith('[corpus]')
+          ? rawIdentifier.replace('[corpus]', '')
+          : rawIdentifier;
+
+      const normalizePosixPath = (p: string): string => {
+        // Keep URL-like strings intact (we handle those above, but be defensive).
+        if (p.match(/^[a-z]+:\/\//i)) return p;
+        const isAbs = p.startsWith('/');
+        const parts = p.split('/').filter((seg) => seg.length > 0);
+        const out: string[] = [];
+        for (const seg of parts) {
+          if (seg === '.') continue;
+          if (seg === '..') {
+            if (out.length > 0 && out[out.length - 1] !== '..') out.pop();
+            else out.push('..');
+            continue;
+          }
+          out.push(seg);
+        }
+        return (isAbs ? '/' : '') + out.join('/');
+      };
+
+      const resolved = normalizePosixPath(resolveAssetPath(assetPath, identifier));
 
       // If the resolved path is an external URL (e.g., when resolving relative to an external USD file),
       // use the proxy endpoint instead of corpus endpoint
@@ -5464,7 +5545,17 @@ export function createViewerCore(opts: {
       }
 
       return `/__usdjs_corpus?file=${encodeURIComponent(relPath)}`;
-    } catch {
+    } catch (err) {
+      try {
+        const q = new URLSearchParams((window as any)?.location?.search ?? '');
+        const USDDEBUG = q.get('usddebug') === '1' || (window as any)?.localStorage?.getItem?.('usddebug') === '1';
+        if (USDDEBUG) {
+          // eslint-disable-next-line no-console
+          console.warn('[usdjs-viewer][resolveAssetUrl] failed', { assetPath, fromIdentifier, err });
+        }
+      } catch {
+        // ignore
+      }
       return null;
     }
   }
@@ -5494,7 +5585,10 @@ export function createViewerCore(opts: {
       const dir = baseName.slice(0, lastSlash);
       const fileName = baseName.slice(lastSlash + 1);
       // ft-lab uses images/ subfolder
-      for (const ext of extensions) {
+      // ft-lab reference renders are typically JPEGs (e.g. OmniPBR_opacity.jpg).
+      // Prefer .jpg first to avoid hard 404s when .png doesn't exist.
+      const ftLabExts = ['.jpg', '.png', '.jpeg', '.webp', '.gif'];
+      for (const ext of ftLabExts) {
         const refImageRel = `${FTLAB_PREFIX}${dir}/images/${fileName}${ext}`;
         return `/__usdjs_corpus?file=${encodeURIComponent(refImageRel)}`;
       }
