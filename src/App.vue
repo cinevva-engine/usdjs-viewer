@@ -184,7 +184,18 @@ const corpusGroupId = ref(CORPUS_GROUPS[0]?.id ?? '');
 const corpusRel = ref<string>('');
 const corpusFiles = computed(() => {
   const g = CORPUS_GROUPS.find((x) => x.id === corpusGroupId.value) ?? CORPUS_GROUPS[0];
-  return (g?.files ?? []).map((rel) => ({ label: rel.split('/').slice(-3).join('/'), value: rel }));
+  const list = (g?.files ?? []).map((rel) => ({ label: rel.split('/').slice(-3).join('/'), value: rel }));
+
+  // If the current value came from URL hash (or manual typing) but isn't in the curated list,
+  // inject it so PrimeVue Select can still display the actual selected path instead of
+  // appearing "stuck" on the previously recognized option.
+  if (corpusRel.value && !list.some((x) => x.value === corpusRel.value)) {
+    list.unshift({
+      label: `[hash] ${corpusRel.value.split('/').slice(-3).join('/')}`,
+      value: corpusRel.value,
+    });
+  }
+  return list;
 });
 
 const corpusRelIndex = computed(() => {
@@ -260,7 +271,13 @@ async function loadFromHash() {
   if (corpusRel.value === rel) return true;
   corpusRel.value = rel;
   const group = CORPUS_GROUPS.find((g) => g.files.includes(rel));
-  if (group) corpusGroupId.value = group.id;
+  if (group) {
+    corpusGroupId.value = group.id;
+  } else {
+    // Heuristic: map common corpora by path prefix even when the curated list doesn't include the file.
+    if (rel.startsWith('test/corpus/external/usd-wg-assets/')) corpusGroupId.value = 'usdwg';
+    if (rel.startsWith('test/corpus/external/ft-lab-sample-usd/')) corpusGroupId.value = 'ftlab';
+  }
   await loadCorpus();
   return true;
 }
@@ -395,16 +412,23 @@ function onCorpusGroupChanged() {
 
 async function loadCorpus() {
   if (!corpusRel.value) return;
-  status.value = `Loading corpus… ${corpusRel.value}`;
-  await core.value?.loadCorpusEntry(corpusRel.value);
-  syncEntryOptions();
-  // loadCorpusEntry already sets the entryKey with the full path, so get it from core
-  entryKey.value = core.value?.getEntryKey() ?? `[corpus]${corpusRel.value}`;
-  const maybeText = core.value?.getEntryText(entryKey.value);
-  if (maybeText != null) sourceText.value = maybeText;
-  await run();
-  // Update reference image URL
-  referenceImageUrl.value = core.value?.getReferenceImageUrl() ?? null;
+  try {
+    status.value = `Loading corpus… ${corpusRel.value}`;
+    await core.value?.loadCorpusEntry(corpusRel.value);
+    syncEntryOptions();
+    // loadCorpusEntry already sets the entryKey with the full path, so get it from core
+    entryKey.value = core.value?.getEntryKey() ?? `[corpus]${corpusRel.value}`;
+    const maybeText = core.value?.getEntryText(entryKey.value);
+    if (maybeText != null) sourceText.value = maybeText;
+    await run();
+    // Update reference image URL
+    referenceImageUrl.value = core.value?.getReferenceImageUrl() ?? null;
+  } catch (e: any) {
+    const msg = String(e?.message ?? e);
+    status.value = `Error loading corpus: ${corpusRel.value}\n${msg}`;
+    // eslint-disable-next-line no-console
+    console.error(e);
+  }
 }
 
 function onNodeSelect(e: any) {
