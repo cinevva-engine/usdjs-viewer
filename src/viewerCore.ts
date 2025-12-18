@@ -36,6 +36,10 @@ export type AnimationState = {
   framesPerSecond: number;
 };
 
+type AnimatedObject =
+  | { kind: 'xform'; obj: THREE.Object3D; prim: SdfPrimSpec; unitScale: number }
+  | { kind: 'points'; geoms: THREE.BufferGeometry[]; prim: SdfPrimSpec; unitScale: number };
+
 export type ViewerCore = {
   getDefaultUsda(): string;
   getEntryKey(): string;
@@ -177,6 +181,10 @@ function interpolateSdfValue(v0: SdfValue | undefined, v1: SdfValue | undefined,
 function propHasAnimation(prim: SdfPrimSpec, name: string): boolean {
   const prop = prim.properties?.get(name);
   return !!(prop?.timeSamples && prop.timeSamples.size > 0);
+}
+
+function primHasAnimatedPoints(prim: SdfPrimSpec): boolean {
+  return propHasAnimation(prim, 'points');
 }
 
 /**
@@ -2798,12 +2806,72 @@ function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: number) {
   const sName = findOpName('xformOp:scale', 'xformOp:scale');
 
   const t = sdfToNumberTuple(getVal(tName), 3);
-  const r = sdfToNumberTuple(getVal(rName), 3);
   const s = sdfToNumberTuple(getVal(sName), 3);
 
   if (t) obj.position.set(t[0]!, t[1]!, t[2]!);
-  if (r) obj.rotation.set(THREE.MathUtils.degToRad(r[0]!), THREE.MathUtils.degToRad(r[1]!), THREE.MathUtils.degToRad(r[2]!));
   if (s) obj.scale.set(s[0]!, s[1]!, s[2]!);
+
+  // Rotation:
+  // - Prefer rotateXYZ if authored.
+  // - Otherwise, support common separate rotate ops (rotateX/Y/Z), including suffixed ones listed in xformOpOrder.
+  //
+  // This is required for real-world samples like usd-wg-assets teapot camera:
+  //   xformOpOrder = ["xformOp:translate:zoomedIn", "xformOp:rotateY:zoomedIn", "xformOp:rotateX:zoomedIn"]
+  const rXYZ = sdfToNumberTuple(getVal(rName), 3);
+  if (rXYZ) {
+    obj.rotation.set(
+      THREE.MathUtils.degToRad(rXYZ[0]!),
+      THREE.MathUtils.degToRad(rXYZ[1]!),
+      THREE.MathUtils.degToRad(rXYZ[2]!)
+    );
+    return;
+  }
+
+  // Apply ordered Euler rotations via quaternion multiplication.
+  // Note: USD applies ops in the listed order; we approximate by multiplying quaternions sequentially.
+  const axisX = new THREE.Vector3(1, 0, 0);
+  const axisY = new THREE.Vector3(0, 1, 0);
+  const axisZ = new THREE.Vector3(0, 0, 1);
+  const q = new THREE.Quaternion();
+  let anyRot = false;
+
+  const applyAxis = (axis: THREE.Vector3, degrees: number) => {
+    const qq = new THREE.Quaternion();
+    qq.setFromAxisAngle(axis, THREE.MathUtils.degToRad(degrees));
+    q.multiply(qq);
+    anyRot = true;
+  };
+
+  for (const opName of order) {
+    if (!opName.startsWith('xformOp:rotate')) continue;
+    if (opName.startsWith('xformOp:rotateX')) {
+      const v = getVal(opName);
+      if (typeof v === 'number') applyAxis(axisX, v);
+    } else if (opName.startsWith('xformOp:rotateY')) {
+      const v = getVal(opName);
+      if (typeof v === 'number') applyAxis(axisY, v);
+    } else if (opName.startsWith('xformOp:rotateZ')) {
+      const v = getVal(opName);
+      if (typeof v === 'number') applyAxis(axisZ, v);
+    } else if (opName.startsWith('xformOp:rotateXYZ')) {
+      const vv = sdfToNumberTuple(getVal(opName), 3);
+      if (vv) {
+        const e = new THREE.Euler(
+          THREE.MathUtils.degToRad(vv[0]!),
+          THREE.MathUtils.degToRad(vv[1]!),
+          THREE.MathUtils.degToRad(vv[2]!),
+          'XYZ'
+        );
+        const qq = new THREE.Quaternion().setFromEuler(e);
+        q.multiply(qq);
+        anyRot = true;
+      }
+    }
+  }
+
+  if (anyRot) {
+    obj.quaternion.copy(q);
+  }
 }
 
 /**
@@ -2817,10 +2885,14 @@ function primHasAnimatedXform(prim: SdfPrimSpec): boolean {
     propHasAnimation(prim, 'xformOp:transform')
   ) return true;
 
-  // Also catch suffixed matrix ops like `xformOp:transform:edit7`
+  // Catch any animated xformOp, including suffixed ops like:
+  // - `xformOp:translate:foo.timeSamples`
+  // - `xformOp:rotateX:zoomedIn.timeSamples` (usd-wg-assets teapot camera)
+  // - `xformOp:transform:edit7.timeSamples`
   if (prim.properties) {
     for (const [k, spec] of prim.properties.entries()) {
-      if (!k.startsWith('xformOp:transform')) continue;
+      if (!k.startsWith('xformOp:')) continue;
+      if (k === 'xformOpOrder') continue;
       if (spec.timeSamples && spec.timeSamples.size > 0) return true;
     }
   }
@@ -2868,7 +2940,7 @@ function renderPrim(
     }) => void;
   },
   currentIdentifier?: string,
-  animatedObjects?: Array<{ obj: THREE.Object3D; prim: SdfPrimSpec; unitScale: number }>,
+  animatedObjects?: AnimatedObject[],
 ) {
   const container = new THREE.Object3D();
   container.name = node.path;
@@ -2881,7 +2953,7 @@ function renderPrim(
 
   // Track animated objects for animation playback
   if (animatedObjects && primHasAnimatedXform(node.prim)) {
-    animatedObjects.push({ obj: container, prim: node.prim, unitScale });
+    animatedObjects.push({ kind: 'xform', obj: container, prim: node.prim, unitScale });
   }
 
   const typeName = node.typeName ?? '';
@@ -3738,6 +3810,28 @@ function renderPrim(
   }
 
   // Points (point cloud) support (e.g. PointClouds.usda)
+  // IMPORTANT: Some USD samples (notably usd-wg-assets teapot animCycle) animate meshes by authoring
+  // `points.timeSamples` (vertex deformation) rather than xformOp time samples. Track those meshes here so
+  // playback can update vertex positions.
+  if (typeName === 'Mesh' && animatedObjects && primHasAnimatedPoints(node.prim)) {
+    const geoms: THREE.BufferGeometry[] = [];
+    container.traverse((o) => {
+      const anyO: any = o as any;
+      const g = anyO?.geometry;
+      if (g && g instanceof THREE.BufferGeometry) {
+        const pos = g.getAttribute('position') as THREE.BufferAttribute | undefined;
+        if (pos && pos.array && pos.itemSize === 3) {
+          geoms.push(g);
+          // Animated vertex data can move outside original bounds; avoid accidental culling.
+          if ('frustumCulled' in anyO) anyO.frustumCulled = false;
+        }
+      }
+    });
+    if (geoms.length > 0) {
+      animatedObjects.push({ kind: 'points', geoms, prim: node.prim, unitScale });
+    }
+  }
+
   if (typeName === 'Points') {
     const points = parsePoint3ArrayToFloat32(getPrimProp(node.prim, 'points'));
     if (!points || points.length < 3) {
@@ -4864,7 +4958,7 @@ export function createViewerCore(opts: {
   let animationFps = 24; // Default USD timeCodesPerSecond
   let lastAnimationFrameTime = 0;
   // Track animated objects: { object, prim, unitScale } for updating transforms each frame
-  const animatedObjects: Array<{ obj: THREE.Object3D; prim: SdfPrimSpec; unitScale: number }> = [];
+  const animatedObjects: AnimatedObject[] = [];
 
   // Three.js setup
   const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -5121,10 +5215,25 @@ export function createViewerCore(opts: {
       }
 
       // Update all animated objects
-      for (const { obj, prim, unitScale } of animatedObjects) {
-        applyXformOps(obj, prim, animationCurrentTime);
-        if (unitScale !== 1.0) {
-          obj.position.multiplyScalar(unitScale);
+      for (const a of animatedObjects) {
+        if (a.kind === 'xform') {
+          applyXformOps(a.obj, a.prim, animationCurrentTime);
+          if (a.unitScale !== 1.0) {
+            a.obj.position.multiplyScalar(a.unitScale);
+          }
+        } else if (a.kind === 'points') {
+          const pts = parsePoint3ArrayToFloat32(getPrimPropAtTime(a.prim, 'points', animationCurrentTime));
+          if (!pts) continue;
+          if (a.unitScale !== 1.0) {
+            for (let i = 0; i < pts.length; i++) pts[i] = pts[i]! * a.unitScale;
+          }
+          for (const g of a.geoms) {
+            const pos = g.getAttribute('position') as THREE.BufferAttribute | undefined;
+            if (!pos || !pos.array || pos.itemSize !== 3) continue;
+            if (pos.array.length !== pts.length) continue;
+            (pos.array as any).set(pts as any);
+            pos.needsUpdate = true;
+          }
         }
       }
     } else {
@@ -5884,8 +5993,8 @@ void main() {
         // Scan animated objects for time range
         let minTime = Infinity;
         let maxTime = -Infinity;
-        for (const { prim } of animatedObjects) {
-          const range = getPrimAnimationTimeRange(prim);
+        for (const a of animatedObjects) {
+          const range = getPrimAnimationTimeRange(a.prim);
           if (range) {
             minTime = Math.min(minTime, range.start);
             maxTime = Math.max(maxTime, range.end);
@@ -5907,6 +6016,13 @@ void main() {
 
       // Reset animation to start
       animationCurrentTime = animationStartTime;
+
+      dbg('animation detected', {
+        animatedObjects: animatedObjects.length,
+        start: animationStartTime,
+        end: animationEndTime,
+        fps: animationFps,
+      });
 
       if (hasUsdLightsRef.value) {
         // Authored lights present: disable viewer defaults (including IBL) to avoid double-lighting.
@@ -6039,10 +6155,25 @@ void main() {
     setAnimationTime: (time: number) => {
       animationCurrentTime = Math.max(animationStartTime, Math.min(animationEndTime, time));
       // Update all animated objects immediately
-      for (const { obj, prim, unitScale } of animatedObjects) {
-        applyXformOps(obj, prim, animationCurrentTime);
-        if (unitScale !== 1.0) {
-          obj.position.multiplyScalar(unitScale);
+      for (const a of animatedObjects) {
+        if (a.kind === 'xform') {
+          applyXformOps(a.obj, a.prim, animationCurrentTime);
+          if (a.unitScale !== 1.0) {
+            a.obj.position.multiplyScalar(a.unitScale);
+          }
+        } else if (a.kind === 'points') {
+          const pts = parsePoint3ArrayToFloat32(getPrimPropAtTime(a.prim, 'points', animationCurrentTime));
+          if (!pts) continue;
+          if (a.unitScale !== 1.0) {
+            for (let i = 0; i < pts.length; i++) pts[i] = pts[i]! * a.unitScale;
+          }
+          for (const g of a.geoms) {
+            const pos = g.getAttribute('position') as THREE.BufferAttribute | undefined;
+            if (!pos || !pos.array || pos.itemSize !== 3) continue;
+            if (pos.array.length !== pts.length) continue;
+            (pos.array as any).set(pts as any);
+            pos.needsUpdate = true;
+          }
         }
       }
     },
