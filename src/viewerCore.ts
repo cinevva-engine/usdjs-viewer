@@ -43,6 +43,19 @@ export type ThreeDebugInfo = {
     skinnedMeshCount: number;
     pointsCount: number;
     lineCount: number;
+    meshes: Array<{
+      name: string;
+      visible: boolean;
+      frustumCulled: boolean;
+      materialType: string;
+      geometry: {
+        positionCount: number;
+        indexCount: number;
+        drawRange: { start: number; count: number };
+        groups: number;
+        boundingSphereRadius: number | null;
+      };
+    }>;
   };
   render: {
     calls: number;
@@ -6242,12 +6255,39 @@ void main() {
       let skinnedMeshCount = 0;
       let pointsCount = 0;
       let lineCount = 0;
+      const meshes: ThreeDebugInfo['content']['meshes'] = [];
       contentRoot.traverse((o) => {
         objectCount++;
-        if ((o as any).isSkinnedMesh) skinnedMeshCount++;
-        else if ((o as any).isMesh) meshCount++;
-        else if ((o as any).isPoints) pointsCount++;
-        else if ((o as any).isLine || (o as any).isLineSegments) lineCount++;
+        if ((o as any).isSkinnedMesh) {
+          skinnedMeshCount++;
+        } else if ((o as any).isMesh) {
+          meshCount++;
+          const anyO: any = o as any;
+          const g: any = anyO.geometry;
+          const pos = g?.getAttribute?.('position');
+          const idx = g?.index;
+          meshes.push({
+            name: anyO.name ?? '',
+            visible: !!anyO.visible,
+            frustumCulled: 'frustumCulled' in anyO ? !!anyO.frustumCulled : true,
+            materialType: anyO.material?.type ?? typeof anyO.material,
+            geometry: {
+              positionCount: typeof pos?.count === 'number' ? pos.count : 0,
+              indexCount: typeof idx?.count === 'number' ? idx.count : 0,
+              drawRange: {
+                start: typeof g?.drawRange?.start === 'number' ? g.drawRange.start : 0,
+                count: typeof g?.drawRange?.count === 'number' ? g.drawRange.count : 0,
+              },
+              groups: Array.isArray(g?.groups) ? g.groups.length : 0,
+              boundingSphereRadius:
+                typeof g?.boundingSphere?.radius === 'number' ? g.boundingSphere.radius : null,
+            },
+          });
+        } else if ((o as any).isPoints) {
+          pointsCount++;
+        } else if ((o as any).isLine || (o as any).isLineSegments) {
+          lineCount++;
+        }
       });
 
       const r: any = (renderer as any).info?.render ?? {};
@@ -6256,7 +6296,7 @@ void main() {
         bg == null ? 'none' : bg?.isColor ? 'Color' : bg?.isTexture ? 'Texture' : typeof bg;
 
       return {
-        content: { objectCount, meshCount, skinnedMeshCount, pointsCount, lineCount },
+        content: { objectCount, meshCount, skinnedMeshCount, pointsCount, lineCount, meshes },
         render: {
           calls: typeof r.calls === 'number' ? r.calls : 0,
           triangles: typeof r.triangles === 'number' ? r.triangles : 0,
