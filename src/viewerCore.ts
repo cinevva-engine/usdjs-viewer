@@ -3681,7 +3681,14 @@ function renderPrim(
         };
 
         const subsetApplied = applyGeomSubsetMaterials();
-        const mesh = new THREE.Mesh(realGeom, subsetApplied.materials);
+        // IMPORTANT: Three.js only renders multi-material meshes when geometry.groups is populated.
+        // If we pass `[mat]` (array) but have zero groups, WebGLRenderer will draw *no triangles*.
+        // So only pass an array when we actually applied GeomSubset groups.
+        const materialForMesh: THREE.Material | THREE.Material[] = subsetApplied.didApply
+          ? subsetApplied.materials
+          : subsetApplied.materials[0]!;
+        const mesh = new THREE.Mesh(realGeom, materialForMesh);
+        mesh.name = node.path;
         mesh.castShadow = true;
         mesh.receiveShadow = true;
         container.add(mesh);
