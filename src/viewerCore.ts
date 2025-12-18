@@ -6033,14 +6033,15 @@ void main() {
       } else {
         // No authored lights: enable viewer defaults.
         // Keep intensities low since RoomEnvironment IBL provides ambient fill.
-        // Very low environment intensity (0.15) minimizes reflections on rough surfaces
-        // while still enabling visible clearcoat/specular effects for smoother materials.
+        // Historically, very low default lighting made some corpus assets look "empty" (nearly black),
+        // especially with physically-correct lights + ACES tonemapping. Use a slightly brighter baseline
+        // so unlit samples remain visible without needing authored lights.
         hemisphereLight.visible = true;
         defaultDir.visible = true;
-        hemisphereLight.intensity = 0.3;
-        defaultDir.intensity = 0.6;
+        hemisphereLight.intensity = 0.6;
+        defaultDir.intensity = 1.2;
         scene.environment = defaultEnvTex;
-        scene.environmentIntensity = 0.15;
+        scene.environmentIntensity = 0.3;
       }
 
       const primCount = compose ? listPrimCount(rootLayerToRender.root) : stage.listPrimPaths().length;
