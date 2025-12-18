@@ -1862,8 +1862,19 @@ function parsePoint3ArrayToFloat32(v: SdfValue | undefined): Float32Array | null
   const arr = new Float32Array(pts.length * 3);
   let w = 0;
   for (const el of pts) {
-    if (!el || typeof el !== 'object' || el.type !== 'tuple') return null;
-    const [x, y, z] = el.value;
+    if (!el || typeof el !== 'object') return null;
+    // Our parser may represent point3f elements as either:
+    // - { type: 'tuple', value: [x,y,z] }
+    // - { type: 'vec3f', value: [x,y,z] }
+    // Accept both to avoid silently dropping geometry.
+    let x: any, y: any, z: any;
+    if ((el as any).type === 'tuple') {
+      [x, y, z] = (el as any).value ?? [];
+    } else if ((el as any).type === 'vec3f') {
+      [x, y, z] = (el as any).value ?? [];
+    } else {
+      return null;
+    }
     if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return null;
     arr[w++] = x;
     arr[w++] = y;
@@ -1879,8 +1890,16 @@ function parseTuple3ArrayToFloat32(v: SdfValue | undefined): Float32Array | null
   const arr = new Float32Array(pts.length * 3);
   let w = 0;
   for (const el of pts) {
-    if (!el || typeof el !== 'object' || el.type !== 'tuple') return null;
-    const [x, y, z] = el.value;
+    if (!el || typeof el !== 'object') return null;
+    // Similar to points, tuple3 arrays may be represented as tuple or vec3f.
+    let x: any, y: any, z: any;
+    if ((el as any).type === 'tuple') {
+      [x, y, z] = (el as any).value ?? [];
+    } else if ((el as any).type === 'vec3f') {
+      [x, y, z] = (el as any).value ?? [];
+    } else {
+      return null;
+    }
     if (typeof x !== 'number' || typeof y !== 'number' || typeof z !== 'number') return null;
     arr[w++] = x;
     arr[w++] = y;
