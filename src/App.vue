@@ -234,6 +234,37 @@ const selectionKeys = ref<Record<string, boolean>>({});
 const lastSelectedPath = ref<string | null>(null);
 const referenceImageUrl = ref<string | null>(null);
 
+const HASH_PREFIX_CORPUS = '#corpus=';
+function readCorpusHash(): string | null {
+  const h = window.location.hash ?? '';
+  if (!h.startsWith(HASH_PREFIX_CORPUS)) return null;
+  const raw = h.slice(HASH_PREFIX_CORPUS.length);
+  if (!raw) return null;
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return raw;
+  }
+}
+
+function normalizeCorpusPathForUi(path: string): string {
+  // Our hash may contain `packages/usdjs/...` (preferred). The corpus dropdown values are relative to `packages/usdjs/`.
+  return path.startsWith('packages/usdjs/') ? path.slice('packages/usdjs/'.length) : path;
+}
+
+async function loadFromHash() {
+  const hashPath = readCorpusHash();
+  if (!hashPath) return false;
+  const rel = normalizeCorpusPathForUi(hashPath);
+  if (!rel) return false;
+  if (corpusRel.value === rel) return true;
+  corpusRel.value = rel;
+  const group = CORPUS_GROUPS.find((g) => g.files.includes(rel));
+  if (group) corpusGroupId.value = group.id;
+  await loadCorpus();
+  return true;
+}
+
 // Animation state
 const hasAnimation = ref(false);
 const animationPlaying = ref(false);
@@ -403,6 +434,7 @@ watch(
   { flush: 'post' }
 );
 
+let unlistenHash: (() => void) | null = null;
 onMounted(async () => {
   if (!viewportEl.value) return;
   const c = createViewerCore({
@@ -419,28 +451,22 @@ onMounted(async () => {
   sourceText.value = c.getDefaultUsda();
 
   if (!headless) {
-    // Restore from hash/localStorage if possible.
-    await c.restoreLastOpened();
-    syncEntryOptions();
-    entryKey.value = c.getEntryKey();
-    sourceText.value = c.getEntryText(entryKey.value) ?? sourceText.value;
-    compose.value = c.getCompose();
+    // Hash is the single source of truth for corpus loading.
+    // If no hash is present, we just render the default textarea scene.
+    await loadFromHash();
 
-    // If a corpus entry is already loaded (restore), reflect it in the dropdowns without re-loading.
-    if (entryKey.value.startsWith('[corpus]')) {
-      const fullPath = entryKey.value.replace('[corpus]', '');
-      // Strip packages/usdjs/ prefix if present to match corpus group files
-      const rel = fullPath.startsWith('packages/usdjs/') 
-        ? fullPath.slice('packages/usdjs/'.length) 
-        : fullPath;
-      corpusRel.value = rel;
-      const group = CORPUS_GROUPS.find((g) => g.files.includes(rel));
-      if (group) corpusGroupId.value = group.id;
-    }
+    const onHashChange = () => {
+      if (isInit.value) return;
+      void loadFromHash();
+    };
+    window.addEventListener('hashchange', onHashChange);
+    unlistenHash = () => window.removeEventListener('hashchange', onHashChange);
   }
 
   isInit.value = false;
-  await run();
+  if (!core.value?.getEntryKey()?.startsWith?.('[corpus]')) {
+    await run();
+  }
   // Update reference image URL after initial run
   referenceImageUrl.value = c.getReferenceImageUrl() ?? null;
 
@@ -466,6 +492,8 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   stopAnimationPolling();
+  unlistenHash?.();
+  unlistenHash = null;
   core.value?.dispose();
   core.value = null;
 });

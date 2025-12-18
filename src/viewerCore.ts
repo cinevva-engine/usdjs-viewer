@@ -4938,15 +4938,6 @@ export function createViewerCore(opts: {
     console.log('[usdjs-viewer] debug enabled (usddebug=1)');
   }
 
-  const LS_KEY_LAST_STATE = 'usdjs-viewer:lastState:v1';
-  type LastViewerState = {
-    entryKey?: string;
-    textarea?: string;
-    compose?: boolean;
-    corpusRel?: string;
-    selectedPath?: string | null;
-  };
-
   const HASH_PREFIX_CORPUS = '#corpus=';
   const CORPUS_PATH_PREFIX = 'packages/usdjs/';
 
@@ -4992,24 +4983,6 @@ export function createViewerCore(opts: {
     }
     // Return the full path as stored in hash (may or may not have packages/usdjs/ prefix for backward compatibility)
     return decoded;
-  }
-
-  function readLastState(): LastViewerState | null {
-    try {
-      const raw = localStorage.getItem(LS_KEY_LAST_STATE);
-      if (!raw) return null;
-      return JSON.parse(raw) as LastViewerState;
-    } catch {
-      return null;
-    }
-  }
-
-  function writeLastState(next: LastViewerState) {
-    try {
-      localStorage.setItem(LS_KEY_LAST_STATE, JSON.stringify(next));
-    } catch {
-      // ignore
-    }
   }
 
   const externalFiles = new Map<string, { name: string; text: string }>();
@@ -5901,7 +5874,6 @@ void main() {
     textareaText = fetched;
 
     setCorpusHash(fullPath);
-    writeLastState({ entryKey: corpusKey, corpusRel: fullPath, compose, selectedPath });
 
     // Prefetch dependencies for composition.
     const queue: Array<{ identifier: string; text: string }> = [{ identifier: rel, text: fetched }];
@@ -6127,13 +6099,6 @@ void main() {
       }
 
       const isCorpus = entryKey.startsWith('[corpus]');
-      writeLastState({
-        entryKey,
-        textarea: entryKey === '<textarea>' ? textareaText : undefined,
-        corpusRel: isCorpus ? entryKey.replace('[corpus]', '') : undefined,
-        compose,
-        selectedPath,
-      });
       setCorpusHash(isCorpus ? entryKey.replace('[corpus]', '') : null);
     } catch (e) {
       opts.onStatus(String((e as any)?.message ?? e));
@@ -6160,28 +6125,6 @@ void main() {
         // fall through
       }
     }
-
-    const st = readLastState();
-    if (!st) return false;
-
-    if (typeof st.compose === 'boolean') compose = st.compose;
-    if (typeof st.selectedPath === 'string' || st.selectedPath === null) selectedPath = st.selectedPath ?? null;
-
-    if (st.corpusRel && typeof st.corpusRel === 'string') {
-      try {
-        await loadCorpusEntry(st.corpusRel);
-        return true;
-      } catch {
-        // fall through
-      }
-    }
-
-    if (st.entryKey === '<textarea>' && typeof st.textarea === 'string') {
-      entryKey = '<textarea>';
-      textareaText = st.textarea;
-      return true;
-    }
-
     return false;
   }
 
