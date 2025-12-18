@@ -36,6 +36,34 @@ export type AnimationState = {
   framesPerSecond: number;
 };
 
+export type ThreeDebugInfo = {
+  content: {
+    objectCount: number;
+    meshCount: number;
+    skinnedMeshCount: number;
+    pointsCount: number;
+    lineCount: number;
+  };
+  render: {
+    calls: number;
+    triangles: number;
+    points: number;
+    lines: number;
+  };
+  camera: {
+    position: [number, number, number];
+    target: [number, number, number];
+    near: number;
+    far: number;
+    fov: number;
+  };
+  scene: {
+    backgroundType: string;
+    hasEnvironment: boolean;
+    environmentIntensity: number | null;
+  };
+};
+
 type AnimatedObject =
   | { kind: 'xform'; obj: THREE.Object3D; prim: SdfPrimSpec; unitScale: number }
   | { kind: 'points'; geoms: THREE.BufferGeometry[]; prim: SdfPrimSpec; unitScale: number };
@@ -70,6 +98,9 @@ export type ViewerCore = {
   setAnimationTime(time: number): void;
   setAnimationPlaying(playing: boolean): void;
   hasAnimation(): boolean;
+
+  // Debugging / introspection (for diagnosing "empty scene" vs "rendered but invisible")
+  getThreeDebugInfo(): ThreeDebugInfo;
 };
 
 const DEFAULT_USDA = `#usda 1.0
@@ -6204,6 +6235,51 @@ void main() {
       }
     },
     hasAnimation: () => animatedObjects.length > 0,
+
+    getThreeDebugInfo: () => {
+      let objectCount = 0;
+      let meshCount = 0;
+      let skinnedMeshCount = 0;
+      let pointsCount = 0;
+      let lineCount = 0;
+      contentRoot.traverse((o) => {
+        objectCount++;
+        if ((o as any).isSkinnedMesh) skinnedMeshCount++;
+        else if ((o as any).isMesh) meshCount++;
+        else if ((o as any).isPoints) pointsCount++;
+        else if ((o as any).isLine || (o as any).isLineSegments) lineCount++;
+      });
+
+      const r: any = (renderer as any).info?.render ?? {};
+      const bg: any = (scene as any).background;
+      const backgroundType =
+        bg == null ? 'none' : bg?.isColor ? 'Color' : bg?.isTexture ? 'Texture' : typeof bg;
+
+      return {
+        content: { objectCount, meshCount, skinnedMeshCount, pointsCount, lineCount },
+        render: {
+          calls: typeof r.calls === 'number' ? r.calls : 0,
+          triangles: typeof r.triangles === 'number' ? r.triangles : 0,
+          points: typeof r.points === 'number' ? r.points : 0,
+          lines: typeof r.lines === 'number' ? r.lines : 0,
+        },
+        camera: {
+          position: [camera.position.x, camera.position.y, camera.position.z],
+          target: [controls.target.x, controls.target.y, controls.target.z],
+          near: camera.near,
+          far: camera.far,
+          fov: camera.fov,
+        },
+        scene: {
+          backgroundType,
+          hasEnvironment: !!scene.environment,
+          environmentIntensity:
+            typeof (scene as any).environmentIntensity === 'number'
+              ? (scene as any).environmentIntensity
+              : null,
+        },
+      };
+    },
   };
 }
 
