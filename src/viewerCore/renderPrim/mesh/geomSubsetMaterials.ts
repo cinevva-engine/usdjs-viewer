@@ -37,6 +37,8 @@ export function applyGeomSubsetMaterials(opts: {
 
         const idx = parseNumberArray(getPrimProp(s, 'indices'));
         if (!idx || idx.length === 0) continue;
+        // We need a real JS array here because we do Set/dedup/sort operations.
+        const faceIndices = Array.from(idx, (x) => x | 0);
 
         // Must have a resolvable material binding
         const bound = resolveMaterialBinding(s, rootPrim, bindingRootForMaterials);
@@ -44,7 +46,7 @@ export function applyGeomSubsetMaterials(opts: {
 
         const smat = resolveMaterial(s);
         applySidedness(meshPrim, smat);
-        picked.push({ prim: s, faceIndices: idx, material: smat });
+        picked.push({ prim: s, faceIndices, material: smat });
     }
     if (picked.length === 0) return { materials: [baseMaterial], didApply: false };
 

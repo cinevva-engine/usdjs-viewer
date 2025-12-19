@@ -27,11 +27,15 @@ export function renderPointsPrim(opts: {
         // Parse per-point widths
         const widthsProp = getPrimProp(node.prim, 'widths');
         let widths: Float32Array | null = null;
-        if (widthsProp && typeof widthsProp === 'object' && (widthsProp as any).type === 'array') {
-            const arr = (widthsProp as any).value as unknown[];
-            widths = new Float32Array(arr.length);
-            for (let i = 0; i < arr.length; i++) {
-                widths[i] = typeof arr[i] === 'number' ? (arr[i] as number) : 1.0;
+        if (widthsProp && typeof widthsProp === 'object') {
+            if ((widthsProp as any).type === 'typedArray' && (widthsProp as any).value instanceof Float32Array) {
+                widths = ((widthsProp as any).value as Float32Array).slice();
+            } else if ((widthsProp as any).type === 'array') {
+                const arr = (widthsProp as any).value as unknown[];
+                widths = new Float32Array(arr.length);
+                for (let i = 0; i < arr.length; i++) {
+                    widths[i] = typeof arr[i] === 'number' ? (arr[i] as number) : 1.0;
+                }
             }
         }
 

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { LoopSubdivision } from 'three-subdivide';
 import type { SdfPrimSpec } from '@cinevva/usdjs';
 import { getPrimProp } from '../usdAnim';
-import { getPropMetadataString, parseNumberArray, parsePoint3ArrayToFloat32, parseTuple3ArrayToFloat32 } from '../usdParse';
+import { getPropMetadataString, parseNumberArray, parsePoint3ArrayToFloat32, parseTuple2ArrayToFloat32, parseTuple3ArrayToFloat32 } from '../usdParse';
 
 import { computeSmoothNormalsDeindexed } from './normals';
 import { flipGeometryWinding } from './winding';
@@ -79,18 +79,7 @@ export function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.
     const stProp = uvPrimvarName ? prim.properties?.get(uvPrimvarName) : undefined;
     const stInterp = getPropMetadataString(stProp, 'interpolation');
     const st = (() => {
-        const dv: any = stProp?.defaultValue;
-        if (!dv || typeof dv !== 'object' || dv.type !== 'array') return null;
-        const arr = new Float32Array(dv.value.length * 2);
-        let w = 0;
-        for (const el of dv.value) {
-            if (!el || typeof el !== 'object' || el.type !== 'tuple') return null;
-            const [u, v] = el.value;
-            if (typeof u !== 'number' || typeof v !== 'number') return null;
-            arr[w++] = u;
-            arr[w++] = v;
-        }
-        return arr;
+        return parseTuple2ArrayToFloat32(stProp?.defaultValue);
     })();
     const stIndices = uvPrimvarName ? parseNumberArray(getPrimProp(prim, `${uvPrimvarName}:indices`)) : null;
 

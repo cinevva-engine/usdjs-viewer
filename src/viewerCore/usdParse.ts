@@ -1,25 +1,42 @@
 import type { SdfValue } from '@cinevva/usdjs';
 
-export function parseNumberArray(v: SdfValue | undefined): number[] | null {
-    if (!v || typeof v !== 'object' || v.type !== 'array') return null;
-    const out: number[] = [];
-    for (const el of v.value) {
-        if (typeof el === 'number') out.push(el);
+export type NumberArrayLike = ArrayLike<number> & Iterable<number>;
+
+function isTypedNumberArrayValue(a: any): a is Float32Array | Float64Array | Int32Array | Uint32Array {
+    return a instanceof Float32Array || a instanceof Float64Array || a instanceof Int32Array || a instanceof Uint32Array;
+}
+
+export function parseNumberArray(v: SdfValue | undefined): NumberArrayLike | null {
+    if (!v || typeof v !== 'object') return null;
+    if (v.type === 'typedArray' && isTypedNumberArrayValue((v as any).value)) {
+        return (v as any).value as NumberArrayLike;
     }
-    return out.length ? out : null;
+    if (v.type !== 'array') return null;
+    // For non-packed arrays: coerce non-numbers to 0 to keep array length stable.
+    const src = (v as any).value as unknown[];
+    if (src.length === 0) return null;
+    const out = new Array<number>(src.length);
+    for (let i = 0; i < src.length; i++) out[i] = typeof src[i] === 'number' ? (src[i] as number) : 0;
+    return out;
 }
 
 export function parsePoint3ArrayToFloat32(v: SdfValue | undefined): Float32Array | null {
-    if (!v || typeof v !== 'object' || v.type !== 'array') return null;
-    const pts = v.value;
+    if (!v || typeof v !== 'object') return null;
+    // Fast path: packed typed array from parser (flat xyzxyz...)
+    if ((v as any).type === 'typedArray') {
+        const elType = (v as any).elementType;
+        const data = (v as any).value;
+        if ((elType === 'point3f' || elType === 'vector3f' || elType === 'normal3f' || elType === 'color3f') && data instanceof Float32Array) {
+            // Return a copy so callers can scale/mutate without mutating stage data.
+            return data.slice();
+        }
+    }
+    if (v.type !== 'array') return null;
+    const pts = (v as any).value as unknown[];
     const arr = new Float32Array(pts.length * 3);
     let w = 0;
     for (const el of pts) {
         if (!el || typeof el !== 'object') return null;
-        // Our parser may represent point3f elements as either:
-        // - { type: 'tuple', value: [x,y,z] }
-        // - { type: 'vec3f', value: [x,y,z] }
-        // Accept both to avoid silently dropping geometry.
         let x: any, y: any, z: any;
         if ((el as any).type === 'tuple') {
             [x, y, z] = (el as any).value ?? [];
@@ -38,13 +55,18 @@ export function parsePoint3ArrayToFloat32(v: SdfValue | undefined): Float32Array
 
 export function parseTuple3ArrayToFloat32(v: SdfValue | undefined): Float32Array | null {
     // For arrays of tuples with 3 numeric components (e.g. color3f[], normal3f[]).
-    if (!v || typeof v !== 'object' || v.type !== 'array') return null;
-    const pts = v.value;
+    if (!v || typeof v !== 'object') return null;
+    if ((v as any).type === 'typedArray') {
+        const elType = (v as any).elementType;
+        const data = (v as any).value;
+        if (elType && String(elType).endsWith('3f') && data instanceof Float32Array) return data.slice();
+    }
+    if (v.type !== 'array') return null;
+    const pts = (v as any).value as unknown[];
     const arr = new Float32Array(pts.length * 3);
     let w = 0;
     for (const el of pts) {
         if (!el || typeof el !== 'object') return null;
-        // Similar to points, tuple3 arrays may be represented as tuple or vec3f.
         let x: any, y: any, z: any;
         if ((el as any).type === 'tuple') {
             [x, y, z] = (el as any).value ?? [];
@@ -57,6 +79,33 @@ export function parseTuple3ArrayToFloat32(v: SdfValue | undefined): Float32Array
         arr[w++] = x;
         arr[w++] = y;
         arr[w++] = z;
+    }
+    return arr;
+}
+
+export function parseTuple2ArrayToFloat32(v: SdfValue | undefined): Float32Array | null {
+    // For arrays of tuples with 2 numeric components (e.g. texCoord2f[]).
+    if (!v || typeof v !== 'object') return null;
+    if ((v as any).type === 'typedArray') {
+        const elType = (v as any).elementType;
+        const data = (v as any).value;
+        if (elType && String(elType).endsWith('2f') && data instanceof Float32Array) return data.slice();
+    }
+    if (v.type !== 'array') return null;
+    const pts = (v as any).value as unknown[];
+    const arr = new Float32Array(pts.length * 2);
+    let w = 0;
+    for (const el of pts) {
+        if (!el || typeof el !== 'object') return null;
+        let x: any, y: any;
+        if ((el as any).type === 'tuple') {
+            [x, y] = (el as any).value ?? [];
+        } else {
+            return null;
+        }
+        if (typeof x !== 'number' || typeof y !== 'number') return null;
+        arr[w++] = x;
+        arr[w++] = y;
     }
     return arr;
 }

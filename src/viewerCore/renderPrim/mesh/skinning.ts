@@ -4,7 +4,7 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 import type { SceneNode } from '../../types';
 import { findNearestSkelRootPrim, findPrimByPath } from '../../usdPaths';
 import { buildJointOrderIndexToBoneIndex, extractJointOrderNames } from '../../usdSkeleton';
-import { getPropMetadataNumber } from '../../usdParse';
+import { getPropMetadataNumber, parseNumberArray } from '../../usdParse';
 
 export function renderUsdSkinnedMesh(opts: {
     container: THREE.Object3D;
@@ -40,15 +40,11 @@ export function renderUsdSkinnedMesh(opts: {
     const jointWeightsVal = jointWeightsProp?.defaultValue;
     const elementSize = getPropMetadataNumber(jointIndicesProp, 'elementSize') ?? 4;
 
-    let jointIndices: number[] | null = null;
-    let jointWeights: number[] | null = null;
+    let jointIndices: ArrayLike<number> | null = null;
+    let jointWeights: ArrayLike<number> | null = null;
 
-    if (jointIndicesVal && typeof jointIndicesVal === 'object' && (jointIndicesVal as any).type === 'array') {
-        jointIndices = (jointIndicesVal as any).value.map((x: any) => typeof x === 'number' ? x : 0);
-    }
-    if (jointWeightsVal && typeof jointWeightsVal === 'object' && (jointWeightsVal as any).type === 'array') {
-        jointWeights = (jointWeightsVal as any).value.map((x: any) => typeof x === 'number' ? x : 0);
-    }
+    jointIndices = parseNumberArray(jointIndicesVal as any);
+    jointWeights = parseNumberArray(jointWeightsVal as any);
 
     // Find the skeleton in the scene graph
     // Walk up to find SkelRoot, then find the Skeleton container with __usdSkeleton

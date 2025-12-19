@@ -38,12 +38,9 @@ export function renderBasisCurvesPrim(opts: {
         // Widths: constant or varying. We'll pick a single width per curve.
         const widthsProp = node.prim.properties?.get('widths');
         const widthsInterp = getPropMetadataString(widthsProp, 'interpolation') ?? 'constant';
-        let widths: number[] | null = null;
+        let widths: ArrayLike<number> | null = null;
         const widthsVal = getPrimProp(node.prim, 'widths');
-        if (widthsVal && typeof widthsVal === 'object' && (widthsVal as any).type === 'array') {
-            const arr = (widthsVal as any).value as unknown[];
-            widths = arr.map((x) => (typeof x === 'number' ? x : 0));
-        }
+        widths = parseNumberArray(widthsVal as any);
 
         // Resolve appearance: prefer bound material color if present, otherwise default orange.
         const boundMat = resolveMaterial(node.prim);
