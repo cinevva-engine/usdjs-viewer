@@ -98,12 +98,14 @@ export function renderUsdLightPrim(opts: {
       (light.shadow.camera as any).near = 0.1;
       (light.shadow.camera as any).far = 1000;
 
-      // DirectionalLight direction is defined by (position -> target). To match USD's convention
-      // ("identity" points along -Z in local space), keep both under the prim container and aim at -Z.
-      // Keep a small separation between light and target so the directional shadow camera
-      // has a stable transform (position affects shadow projection).
-      light.position.set(0, 0, 1);
-      light.target.position.set(0, 0, 0);
+      // DirectionalLight direction is defined by (position -> target).
+      //
+      // In practice (and matching ft-lab samples), treat a USD DistantLight with identity xform as
+      // shining along +Z in its local space, then let authored rotations steer it.
+      //
+      // Keep both light and target under the prim container so authored xforms apply.
+      light.position.set(0, 0, 0);
+      light.target.position.set(0, 0, 1);
       container.add(light.target);
       container.add(light);
       // Important: do NOT also `scene.add(light)` here; it would detach from `container` and lose authored xforms.
