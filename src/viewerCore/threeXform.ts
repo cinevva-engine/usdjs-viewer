@@ -226,13 +226,23 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
 
     const threeMatrixToUsdRows = (mCol: THREE.Matrix4): UsdRows4 => {
         // Three's `elements` is column-major: e[col*4 + row]
-        // USD rows = transpose(mCol): rows[r][c] = mCol[c][r]
+        // USD uses row-vector convention, so its matrix is the TRANSPOSE of the Three/column-vector matrix.
+        // If mCol is:
+        //   [ m11 m12 m13 m14
+        //     m21 m22 m23 m24
+        //     m31 m32 m33 m34
+        //     m41 m42 m43 m44 ]
+        // then USD rows should be:
+        //   [ m11 m21 m31 m41
+        //     m12 m22 m32 m42
+        //     m13 m23 m33 m43
+        //     m14 m24 m34 m44 ]
         const e = mCol.elements;
         return [
-            [e[0], e[4], e[8], e[12]],
-            [e[1], e[5], e[9], e[13]],
-            [e[2], e[6], e[10], e[14]],
-            [e[3], e[7], e[11], e[15]],
+            [e[0], e[1], e[2], e[3]],
+            [e[4], e[5], e[6], e[7]],
+            [e[8], e[9], e[10], e[11]],
+            [e[12], e[13], e[14], e[15]],
         ];
     };
 
@@ -288,46 +298,34 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
     ]);
 
     const usdRotateXRows = (deg: number): UsdRows4 => {
-        const r = THREE.MathUtils.degToRad(deg);
-        const c = Math.cos(r);
-        const s = Math.sin(r);
-        // Row-vector rotation = transpose(column-vector rotation)
-        return [
-            [1, 0, 0, 0],
-            [0, c, s, 0],
-            [0, -s, c, 0],
-            [0, 0, 0, 1],
-        ];
+        // Keep rotation semantics consistent with the non-matrix path (matrixForOp),
+        // which already matches usd-wg-assets for simple_transform.
+        // We build the Three.js (column-vector) rotation matrix, then transpose to USD rows.
+        const mCol = new THREE.Matrix4().makeRotationX(THREE.MathUtils.degToRad(-deg));
+        return threeMatrixToUsdRows(mCol);
     };
 
     const usdRotateYRows = (deg: number): UsdRows4 => {
-        const r = THREE.MathUtils.degToRad(deg);
-        const c = Math.cos(r);
-        const s = Math.sin(r);
-        return [
-            [c, 0, -s, 0],
-            [0, 1, 0, 0],
-            [s, 0, c, 0],
-            [0, 0, 0, 1],
-        ];
+        const mCol = new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(-deg));
+        return threeMatrixToUsdRows(mCol);
     };
 
     const usdRotateZRows = (deg: number): UsdRows4 => {
-        const r = THREE.MathUtils.degToRad(deg);
-        const c = Math.cos(r);
-        const s = Math.sin(r);
-        return [
-            [c, s, 0, 0],
-            [-s, c, 0, 0],
-            [0, 0, 1, 0],
-            [0, 0, 0, 1],
-        ];
+        const mCol = new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(-deg));
+        return threeMatrixToUsdRows(mCol);
     };
 
     const usdRotateXYZRows = (degX: number, degY: number, degZ: number): UsdRows4 => {
-        // USD rotateXYZ applies X then Y then Z in its native (row-vector) convention.
-        // So the op matrix is: Rx * Ry * Rz (right-multiply chain).
-        return usdMulRows(usdMulRows(usdRotateXRows(degX), usdRotateYRows(degY)), usdRotateZRows(degZ));
+        // Match the mapping we use elsewhere for rotateXYZ when targeting Three.js:
+        // `rotateXYZ(x,y,z)` -> Euler('ZYX', -x, -y, -z)
+        const e = new THREE.Euler(
+            THREE.MathUtils.degToRad(-degX),
+            THREE.MathUtils.degToRad(-degY),
+            THREE.MathUtils.degToRad(-degZ),
+            'ZYX',
+        );
+        const mCol = new THREE.Matrix4().makeRotationFromEuler(e);
+        return threeMatrixToUsdRows(mCol);
     };
 
     const usdRowsForOp = (opName: string): UsdRows4 | null => {
@@ -433,8 +431,10 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
             if (!rows) continue;
             const rowsToApply = invert ? usdInvertRows(rows) : rows;
             if (!rowsToApply) continue;
-            // Row-vector chaining: v' = v * (M1 * M2 * ...), so right-multiply in authored order.
-            composedRows = usdMulRows(composedRows, rowsToApply);
+            // USD `xformOpOrder` is authored outer-to-inner (common stacks list translate before rotate before scale).
+            // To apply ops in the authored order under row-vector convention, we pre-multiply here.
+            // This matches the usd-wg-assets transform reference renders for complex stacks.
+            composedRows = usdMulRows(rowsToApply, composedRows);
             any = true;
         }
 
