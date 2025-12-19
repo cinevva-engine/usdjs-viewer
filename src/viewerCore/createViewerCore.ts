@@ -1,0 +1,486 @@
+import * as THREE from 'three';
+import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
+import { EffectComposer } from 'three/examples/jsm/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/examples/jsm/postprocessing/RenderPass.js';
+import { ShaderPass } from 'three/examples/jsm/postprocessing/ShaderPass.js';
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js';
+import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLightUniformsLib.js';
+
+import { UsdStage, type SdfPrimSpec, type SdfValue, resolveAssetPath } from '@cinevva/usdjs';
+
+import type { AnimatedObject, PrimeTreeNode, SceneNode, ThreeDebugInfo, ViewerCore } from './types';
+import { DEFAULT_USDA } from './constants';
+import { getPrimAnimationTimeRange, getPrimProp, getPrimPropAtTime, primHasAnimatedPoints, propHasAnimation, sdfToNumberTuple } from './usdAnim';
+import { findNearestSkelRootPrim, findPrimByPath } from './usdPaths';
+import { buildJointOrderIndexToBoneIndex, extractJointOrderNames } from './usdSkeleton';
+import { buildTree, toPrimeTree } from './usdTree';
+import { extractAssetStrings, getPropMetadataNumber, getPropMetadataString, parseNumberArray, parsePoint3ArrayToFloat32, parseTuple3ArrayToFloat32 } from './usdParse';
+import { applyXformOps, parseMatrix4dArray, primHasAnimatedXform } from './threeXform';
+import { buildUsdMeshGeometry, computePointsBounds, computeSmoothNormalsDeindexed, flipGeometryWinding } from './threeGeom';
+import { createMaterialFromShader, extractShaderInputs, resolveMaterialBinding, resolveShaderFromMaterial } from './materials';
+import { renderPrim } from './renderPrim';
+import { createTextResolver } from './resolver';
+import { createGetReferenceImageUrl, createResolveAssetUrl } from './assetUrls';
+import { extractDependencies, fetchCorpusFile } from './corpus';
+import { createCorpusHashHelpers } from './corpusHash';
+import { applyCameraSettings as applyCameraSettingsExternal, frameToFit as frameToFitExternal } from './camera';
+import { applyRenderSettings as applyRenderSettingsExternal, ensurePost as ensurePostExternal } from './postprocessing';
+import { advanceAnimationPlayback, applyAnimatedObjectsAtTime } from './animationPlayback';
+import { getThreeDebugInfo as getThreeDebugInfoExternal } from './threeDebug';
+import { createDomeEnvironmentController } from './domeEnvironment';
+import { loadCorpusEntryExternal } from './corpusEntry';
+import { createRunPipeline } from './runPipeline';
+
+function tupleToColor(tuple: any): THREE.Color | null {
+  if (!tuple || tuple.type !== 'tuple' || tuple.value.length < 3) return null;
+  const [r, g, b] = tuple.value;
+  if (typeof r !== 'number' || typeof g !== 'number' || typeof b !== 'number') return null;
+  return new THREE.Color(Math.max(0, Math.min(1, r)), Math.max(0, Math.min(1, g)), Math.max(0, Math.min(1, b)));
+}
+
+function listPrimCount(root: any): number {
+  let n = 0;
+  const walk = (p: any) => {
+    n++;
+    if (!p.children) return;
+    for (const c of p.children.values()) walk(c);
+  };
+  walk(root);
+  return n;
+}
+
+export function createViewerCore(opts: {
+  viewportEl: HTMLElement;
+  onStatus: (msg: string) => void;
+  onTree: (nodes: PrimeTreeNode[], selectedPath: string | null) => void;
+}): ViewerCore {
+  // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+  // Keep logs throttled so huge scenes don't spam the console.
+  const USDDEBUG =
+    (() => {
+      try {
+        const q = new URLSearchParams(window.location.search ?? '');
+        if (q.get('usddebug') === '1') return true;
+        if (localStorage.getItem('usddebug') === '1') return true;
+      } catch {
+        // ignore
+      }
+      return false;
+    })();
+  const dbg = (...args: any[]) => {
+    if (!USDDEBUG) return;
+    // Use console.log (not console.debug) so it shows up even when DevTools filters out "Verbose".
+    // eslint-disable-next-line no-console
+    console.log('[usdjs-viewer]', ...args);
+  };
+  if (USDDEBUG) {
+    // eslint-disable-next-line no-console
+    console.log('[usdjs-viewer] debug enabled (usddebug=1)');
+  }
+
+  // Perf instrumentation (always-on, very low overhead).
+  // Produces `performance.measure()` entries visible in Chrome DevTools Performance panel, e.g.:
+  // - usdjs:run#12:stageOpen
+  // - usdjs:run#12:compose
+  // - usdjs:run#12:buildTree
+  // - usdjs:run#12:renderPrim
+  // - usdjs:run#12:frameToFit
+  let runSeq = 0;
+  const perfMark = (name: string) => {
+    try {
+      performance.mark(name);
+    } catch {
+      // ignore
+    }
+  };
+  const perfMeasure = (name: string, startMark: string, endMark: string) => {
+    try {
+      performance.measure(name, startMark, endMark);
+    } catch {
+      // ignore
+    }
+  };
+
+  const HASH_PREFIX_CORPUS = '#corpus=';
+  const CORPUS_PATH_PREFIX = 'packages/usdjs/';
+  const { normalizeCorpusPathForHash, normalizeCorpusPathForFetch, setCorpusHash, readCorpusHash } =
+    createCorpusHashHelpers({ corpusPathPrefix: CORPUS_PATH_PREFIX, hashPrefixCorpus: HASH_PREFIX_CORPUS });
+
+  const externalFiles = new Map<string, { name: string; text: string }>();
+  let textareaText = DEFAULT_USDA;
+  let entryKey = '<textarea>';
+  let compose = true;
+  let selectedPath: string | null = null;
+  let currentIdentifier = '<viewer>';
+  let stageUnitScale = 1.0; // metersPerUnit (defaults to 1m per unit)
+
+  const resolveAssetUrl = createResolveAssetUrl({ getCurrentIdentifier: () => currentIdentifier });
+  const getReferenceImageUrl = createGetReferenceImageUrl({ getEntryKey: () => entryKey });
+
+  // Animation state
+  let animationPlaying = false;
+  let animationCurrentTime = 0;
+  let animationStartTime = 0;
+  let animationEndTime = 0;
+  let animationFps = 24; // Default USD timeCodesPerSecond
+  let lastAnimationFrameTime = 0;
+  // Track animated objects: { object, prim, unitScale } for updating transforms each frame
+  const animatedObjects: AnimatedObject[] = [];
+
+  // Three.js setup
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  // Stable selector for automation (Playwright) and debugging.
+  (renderer.domElement as any).dataset ??= {};
+  (renderer.domElement as any).dataset.testid = 'usdjs-canvas';
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.shadowMap.enabled = true;
+  // Use PCFShadowMap so `light.shadow.radius` actually softens edges.
+  // (PCFSoftShadowMap has a fixed kernel and tends to stay crisp unless resolution is very high.)
+  renderer.shadowMap.type = THREE.PCFShadowMap;
+  renderer.outputColorSpace = THREE.SRGBColorSpace;
+  renderer.toneMapping = THREE.ACESFilmicToneMapping;
+  renderer.toneMappingExposure = 0.6;
+  // Required for correct RectAreaLight shading in WebGLRenderer (LTC uniforms).
+  RectAreaLightUniformsLib.init();
+  // Prefer physically-based light calculations when available. Recent Three versions use
+  // `useLegacyLights`; older versions used `physicallyCorrectLights`.
+  if ('useLegacyLights' in renderer) (renderer as any).useLegacyLights = false;
+  else if ('physicallyCorrectLights' in renderer) (renderer as any).physicallyCorrectLights = true;
+  opts.viewportEl.append(renderer.domElement);
+
+  // Optional post-processing (enabled when renderSettings ask for it)
+  const composerRef: { value: EffectComposer | null } = { value: null };
+  const renderPassRef: { value: RenderPass | null } = { value: null };
+  const colorPassRef: { value: ShaderPass | null } = { value: null };
+  const useComposerRef: { value: boolean } = { value: false };
+
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x0f0f1a);
+
+  // Default IBL environment (keeps background solid, but enables reflections for PBR / clearcoat).
+  // This makes texture-driven clearcoat effects visible (e.g. UsdPreviewSurface_clearcoat_with_texture.usda).
+  // Use default sigma (0.04) for environment map blur.
+  const pmremGen = new THREE.PMREMGenerator(renderer);
+  const envRt = pmremGen.fromScene(new RoomEnvironment(), 0.04);
+  const defaultEnvTex = envRt.texture;
+  scene.environment = null;
+  const domeEnv = createDomeEnvironmentController({ scene, pmremGen });
+
+  const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1_000_000);
+  camera.position.set(80, 60, 120);
+  const controls = new OrbitControls(camera, renderer.domElement);
+  controls.target.set(0, 15, 0);
+  controls.update();
+
+  // Grid helper: render after content, enable z-test but disable z-write
+  const gridHelper = new THREE.GridHelper(200, 20, 0x333333, 0x222222);
+  gridHelper.renderOrder = 1; // Render after content (default renderOrder is 0)
+  gridHelper.traverse((child) => {
+    const anyChild = child as any;
+    if (anyChild?.isLine && anyChild?.material) {
+      const mats: THREE.Material[] = Array.isArray(anyChild.material) ? anyChild.material : [anyChild.material];
+      for (const m of mats) {
+        (m as any).depthTest = true; // Enable z-test (occlusion by model)
+        (m as any).depthWrite = false; // Disable z-write (don't modify depth buffer)
+      }
+    }
+  });
+  scene.add(gridHelper);
+
+  // Axes helper: render last, enable z-test but disable z-write
+  const axesHelper = new THREE.AxesHelper(20);
+  axesHelper.renderOrder = 2; // Render last (after grid and content)
+  axesHelper.traverse((child) => {
+    const anyChild = child as any;
+    if (anyChild?.isLine && anyChild?.material) {
+      const mats: THREE.Material[] = Array.isArray(anyChild.material) ? anyChild.material : [anyChild.material];
+      for (const m of mats) {
+        (m as any).depthTest = true; // Enable z-test (occlusion by model)
+        (m as any).depthWrite = false; // Disable z-write (don't modify depth buffer)
+      }
+    }
+  });
+  scene.add(axesHelper);
+
+  // Default lights: kept low since RoomEnvironment IBL provides ambient fill.
+  // These add subtle directionality without over-lighting the scene.
+  const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x222222, 0.2);
+  scene.add(hemisphereLight);
+  const defaultDir = new THREE.DirectionalLight(0xffffff, 0.4);
+  defaultDir.position.set(100, 200, 100);
+  scene.add(defaultDir);
+
+  const fogRef: { value: THREE.Fog | null } = { value: null };
+
+  const contentRoot = new THREE.Object3D();
+  scene.add(contentRoot);
+
+  // Some Three.js helpers (e.g. PointLightHelper/SpotLightHelper) require manual update after transforms change.
+  const dynamicHelperUpdates: Array<() => void> = [];
+
+  // Track all skeletons that need to be updated every frame for SkinnedMesh
+  const skeletonsToUpdate: Array<{ skeleton: THREE.Skeleton; boneRoot: THREE.Object3D }> = [];
+
+  function resize() {
+    const w = opts.viewportEl.clientWidth;
+    const h = opts.viewportEl.clientHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    composerRef.value?.setSize(w, h);
+  }
+  const onResize = () => resize();
+  window.addEventListener('resize', onResize);
+  resize();
+
+  let raf = 0;
+  function renderLoop(timestamp: number) {
+    controls.update();
+
+    ({ animationCurrentTime, lastAnimationFrameTime } = advanceAnimationPlayback({
+      timestamp,
+      animationPlaying,
+      animationCurrentTime,
+      animationStartTime,
+      animationEndTime,
+      animationFps,
+      lastAnimationFrameTime,
+      animatedObjects,
+    }));
+
+    // Use dirty checking instead of forcing full update every frame
+    // Three.js automatically marks objects dirty when position/quaternion/scale change,
+    // and controls.update() marks the camera dirty, so this is safe and much faster
+    scene.updateMatrixWorld(false);
+    // Update all skeletons for SkinnedMesh - this must happen every frame
+    // First update the bone hierarchy, then update the skeleton matrices
+    for (const { skeleton, boneRoot } of skeletonsToUpdate) {
+      // Bone roots are already updated by scene.updateMatrixWorld above if they're dirty
+      // Using false here avoids redundant updates while still ensuring bones are current
+      boneRoot.updateMatrixWorld(false);
+      // Update skeleton's bone matrices for skinning
+      skeleton.update();
+    }
+    for (const fn of dynamicHelperUpdates) fn();
+    if (useComposerRef.value && composerRef.value) composerRef.value.render();
+    else renderer.render(scene, camera);
+    raf = requestAnimationFrame(renderLoop);
+  }
+  raf = requestAnimationFrame(renderLoop);
+
+  function clearThreeRoot() {
+    while (contentRoot.children.length) contentRoot.remove(contentRoot.children[0]!);
+    skeletonsToUpdate.length = 0; // Clear skeletons list when clearing scene
+    animatedObjects.length = 0; // Clear animated objects list when clearing scene
+  }
+
+
+
+  const ensurePost = () =>
+    ensurePostExternal({
+      composerRef,
+      renderPassRef,
+      colorPassRef,
+      renderer,
+      scene,
+      camera,
+      resize,
+    });
+
+  const applyRenderSettings = (layer: any) =>
+    applyRenderSettingsExternal({
+      layer,
+      scene,
+      hemisphereLight,
+      tupleToColor,
+      fogRef,
+      useComposerRef,
+      composerRef,
+      renderPassRef,
+      colorPassRef,
+      renderer,
+      camera,
+      resize,
+    });
+
+  // Default camera position and target
+  const DEFAULT_CAMERA_POSITION = { x: 80, y: 60, z: 120 };
+  const DEFAULT_CAMERA_TARGET = { x: 0, y: 15, z: 0 };
+
+  function resetCameraToDefault() {
+    camera.position.set(DEFAULT_CAMERA_POSITION.x, DEFAULT_CAMERA_POSITION.y, DEFAULT_CAMERA_POSITION.z);
+    controls.target.set(DEFAULT_CAMERA_TARGET.x, DEFAULT_CAMERA_TARGET.y, DEFAULT_CAMERA_TARGET.z);
+    controls.update();
+  }
+
+  const frameToFit = () => frameToFitExternal({ scene, contentRoot, camera, controls });
+
+  const applyCameraSettings = (layer: any): boolean =>
+    applyCameraSettingsExternal({ layer, camera, controls, stageUnitScale });
+
+  function getEntryOptions(): Array<{ label: string; value: string }> {
+    const optsOut: Array<{ label: string; value: string }> = [{ label: '<textarea>', value: '<textarea>' }];
+    for (const key of Array.from(externalFiles.keys()).sort()) {
+      const label = key.startsWith('[corpus]') ? key.replace('[corpus]', '').split('/').pop() ?? key : key;
+      optsOut.push({ label, value: key });
+    }
+    return optsOut;
+  }
+
+  function getEntryText(key: string): string | null {
+    if (key === '<textarea>') return textareaText;
+    const f = externalFiles.get(key);
+    return f?.text ?? null;
+  }
+
+  async function loadLocalFiles(files: FileList) {
+    for (const f of Array.from(files)) {
+      const key = (f as any).webkitRelativePath ? (f as any).webkitRelativePath : f.name;
+      const text = await f.text();
+      externalFiles.set(key, { name: f.name, text });
+    }
+  }
+
+  function loadTextFiles(files: Array<{ path: string; text: string }>) {
+    for (const f of files) {
+      const key = f.path;
+      const name = key.split('/').pop() ?? key;
+      externalFiles.set(key, { name, text: f.text });
+    }
+  }
+
+  async function loadCorpusEntry(rel: string) {
+    await loadCorpusEntryExternal({
+      rel,
+      CORPUS_PATH_PREFIX,
+      normalizeCorpusPathForFetch,
+      normalizeCorpusPathForHash,
+      fetchCorpusFile,
+      extractDependencies,
+      externalFiles,
+      setEntryKey: (k) => (entryKey = k),
+      setTextareaText: (t) => (textareaText = t),
+      setCorpusHash,
+      dbg,
+    });
+  }
+
+  const runSeqRef: { value: number } = { value: 0 };
+
+  const { run } = createRunPipeline({
+    dbg,
+    perfMark,
+    perfMeasure,
+    onStatus: opts.onStatus,
+    onTree: opts.onTree,
+    externalFiles,
+    getEntryKey: () => entryKey,
+    getTextareaText: () => textareaText,
+    getCompose: () => compose,
+    getSelectedPath: () => selectedPath,
+    setCurrentIdentifier: (id) => (currentIdentifier = id),
+    getCurrentIdentifier: () => currentIdentifier,
+    setStageUnitScale: (s) => (stageUnitScale = s),
+    getStageUnitScale: () => stageUnitScale,
+    domeEnvResetForNewSample: () => domeEnv.resetForNewSample(),
+    applyCameraSettings,
+    applyRenderSettings,
+    clearThreeRoot,
+    contentRoot,
+    scene,
+    resolveAssetUrl,
+    renderPrim,
+    dynamicHelperUpdates,
+    skeletonsToUpdate,
+    animatedObjects,
+    domeEnvSetFromDomeLight: domeEnv.setFromDomeLight,
+    defaultEnvTex,
+    hemisphereLight,
+    defaultDir,
+    frameToFit,
+    listPrimCount,
+    setCorpusHash,
+    runSeqRef,
+    getAnimationStartTime: () => animationStartTime,
+    getAnimationEndTime: () => animationEndTime,
+    getAnimationFps: () => animationFps,
+    setAnimationStartTime: (t) => (animationStartTime = t),
+    setAnimationEndTime: (t) => (animationEndTime = t),
+    setAnimationFps: (fps) => (animationFps = fps),
+    setAnimationCurrentTime: (t) => (animationCurrentTime = t),
+  });
+
+  // `run` is provided by runPipeline (see above)
+
+  async function restoreLastOpened(): Promise<boolean> {
+    const hashCorpusRel = readCorpusHash();
+    if (hashCorpusRel) {
+      try {
+        // loadCorpusEntry handles both formats (with or without packages/usdjs/ prefix)
+        await loadCorpusEntry(hashCorpusRel);
+        return true;
+      } catch {
+        // fall through
+      }
+    }
+    return false;
+  }
+
+  function dispose() {
+    cancelAnimationFrame(raf);
+    window.removeEventListener('resize', onResize);
+    controls.dispose();
+    envRt.dispose();
+    domeEnv.dispose();
+    pmremGen.dispose();
+    renderer.dispose();
+    renderer.domElement.remove();
+  }
+
+  return {
+    getDefaultUsda: () => DEFAULT_USDA,
+    getEntryKey: () => entryKey,
+    getCompose: () => compose,
+    getEntryOptions,
+    getEntryText,
+    getReferenceImageUrl,
+    setTextarea: (t) => (textareaText = t),
+    setEntryKey: (k) => (entryKey = k),
+    setCompose: (v) => (compose = v),
+    setSelectedPath: async (p) => {
+      selectedPath = p;
+    },
+    loadLocalFiles,
+    loadTextFiles,
+    loadCorpusEntry,
+    restoreLastOpened,
+    run,
+    dispose,
+
+    // Animation controls
+    getAnimationState: () => ({
+      playing: animationPlaying,
+      currentTime: animationCurrentTime,
+      startTime: animationStartTime,
+      endTime: animationEndTime,
+      framesPerSecond: animationFps,
+    }),
+    setAnimationTime: (time: number) => {
+      animationCurrentTime = Math.max(animationStartTime, Math.min(animationEndTime, time));
+      applyAnimatedObjectsAtTime({ animatedObjects, time: animationCurrentTime });
+    },
+    setAnimationPlaying: (playing: boolean) => {
+      animationPlaying = playing;
+      if (playing) {
+        lastAnimationFrameTime = 0; // Reset timing for smooth playback
+      }
+    },
+    hasAnimation: () => animatedObjects.length > 0,
+
+    getThreeDebugInfo: () => {
+      return getThreeDebugInfoExternal({ contentRoot, renderer, scene, camera, controls });
+    },
+  };
+}
+
+
