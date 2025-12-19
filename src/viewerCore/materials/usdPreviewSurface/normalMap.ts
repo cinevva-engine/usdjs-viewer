@@ -3,6 +3,33 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 
 import { applyUsdTransform2dToTexture, applyWrapMode } from '../textureUtils';
 
+// Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+// IMPORTANT: normal map resolution runs during scene load and can spam / slow traces.
+const USDDEBUG =
+  (() => {
+    try {
+      if (typeof window === 'undefined') return false;
+      const q = new URLSearchParams((window as any).location?.search ?? '');
+      if (q.get('usddebug') === '1') return true;
+      if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  })();
+
+const dbg = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.log('[usdjs-viewer:UsdPreviewSurfaceNormalMap]', ...args);
+};
+
+const dbgError = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.error('[usdjs-viewer:UsdPreviewSurfaceNormalMap]', ...args);
+};
+
 export function applyUsdPreviewSurfaceNormalMap(opts: {
   root: SdfPrimSpec;
   shader: SdfPrimSpec;
@@ -15,17 +42,19 @@ export function applyUsdPreviewSurfaceNormalMap(opts: {
 
   // `inputs:normal.connect` to a UsdUVTexture (e.g. UsdPreviewSurface_opacityThreshold.usda)
   const nSource = resolveConnectedPrim(root, shader, 'inputs:normal');
-  console.log('[NormalBiasScale DEBUG] nSource:', nSource?.path?.primPath ?? 'null');
+  if (USDDEBUG) dbg('[NormalBiasScale DEBUG] nSource:', nSource?.path?.primPath ?? 'null');
   if (nSource) {
     const info = resolveUsdUvTextureInfo(root, nSource);
-    console.log('[NormalBiasScale DEBUG] texture info:', info ? {
-      file: info.file,
-      scaleRaw: info.scaleRaw,
-      biasRaw: info.biasRaw,
-    } : 'null');
+    if (USDDEBUG) {
+      dbg('[NormalBiasScale DEBUG] texture info:', info ? {
+        file: info.file,
+        scaleRaw: info.scaleRaw,
+        biasRaw: info.biasRaw,
+      } : 'null');
+    }
     if (info) {
       const url = resolveAssetUrl?.(info.file);
-      console.log('[NormalBiasScale DEBUG] resolved URL:', url);
+      if (USDDEBUG) dbg('[NormalBiasScale DEBUG] resolved URL:', url);
       if (url) {
         // USD's UsdUVTexture applies: result = sample * scale + bias (per-component)
         // Default values are scale=(1,1,1,1) and bias=(0,0,0,0), but for normal maps
@@ -46,14 +75,14 @@ export function applyUsdPreviewSurfaceNormalMap(opts: {
 
         // Set up onBeforeCompile to inject custom normal map transformation
         // Only needed if not using standard Three.js convention
-        console.log('[NormalBiasScale DEBUG] isStandardThreeJs:', isStandardThreeJs, 'scale:', scale, 'bias:', bias);
+        if (USDDEBUG) dbg('[NormalBiasScale DEBUG] isStandardThreeJs:', isStandardThreeJs, 'scale:', scale, 'bias:', bias);
         if (!isStandardThreeJs) {
           mat.userData.usdNormalScale = usdNormalScale;
           mat.userData.usdNormalBias = usdNormalBias;
-          console.log('[NormalBiasScale DEBUG] Setting up onBeforeCompile for custom scale/bias');
+          if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Setting up onBeforeCompile for custom scale/bias');
 
           mat.onBeforeCompile = (shader) => {
-            console.log('[NormalBiasScale DEBUG] onBeforeCompile called');
+            if (USDDEBUG) dbg('[NormalBiasScale DEBUG] onBeforeCompile called');
             // Add uniforms for USD normal scale/bias
             shader.uniforms.usdNormalScale = { value: usdNormalScale };
             shader.uniforms.usdNormalBias = { value: usdNormalBias };
@@ -97,19 +126,19 @@ uniform vec3 usdNormalBias;`
               customNormalFragmentMaps
             );
             const replaced = !shader.fragmentShader.includes('#include <normal_fragment_maps>');
-            console.log('[NormalBiasScale DEBUG] normal_fragment_maps include found:', hasInclude, 'replaced:', replaced);
+            if (USDDEBUG) dbg('[NormalBiasScale DEBUG] normal_fragment_maps include found:', hasInclude, 'replaced:', replaced);
           };
 
           // Ensure shader gets recompiled
           mat.customProgramCacheKey = () => `usd_normal_${scale.join('_')}_${bias.join('_')}`;
         } else {
-          console.log('[NormalBiasScale DEBUG] Using standard Three.js normal map handling');
+          if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Using standard Three.js normal map handling');
         }
 
         new THREE.TextureLoader().load(
           url,
           (tex: any) => {
-            console.log('[NormalBiasScale DEBUG] Normal texture loaded successfully:', info.file);
+            if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Normal texture loaded successfully:', info.file);
             tex.colorSpace = THREE.NoColorSpace;
             applyWrapMode(tex, info.wrapS, info.wrapT);
             if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
@@ -118,16 +147,18 @@ uniform vec3 usdNormalBias;`
             // For standard Three.js convention, we don't need custom shader
             // normalScale is left at default (1,1)
             mat.needsUpdate = true;
-            console.log('[NormalBiasScale DEBUG] Material after normal map:', {
-              color: mat.color.getHexString(),
-              normalMap: !!mat.normalMap,
-              roughness: mat.roughness,
-              metalness: mat.metalness,
-            });
+            if (USDDEBUG) {
+              dbg('[NormalBiasScale DEBUG] Material after normal map:', {
+                color: mat.color.getHexString(),
+                normalMap: !!mat.normalMap,
+                roughness: mat.roughness,
+                metalness: mat.metalness,
+              });
+            }
           },
           undefined,
           (err: unknown) => {
-            console.error('Failed to load UsdPreviewSurface normal texture:', info.file, url, err);
+            dbgError('Failed to load UsdPreviewSurface normal texture:', info.file, url, err);
           },
         );
       }

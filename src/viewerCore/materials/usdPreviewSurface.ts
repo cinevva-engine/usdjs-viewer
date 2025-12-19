@@ -5,6 +5,35 @@ import { alphaToGreenAlphaMap, applyUsdTransform2dToTexture, applyWrapMode } fro
 import { guessSolidColorFromAssetPath } from './usdPreviewSurface/guessSolidColor';
 import { applyUsdPreviewSurfaceNormalMap } from './usdPreviewSurface/normalMap';
 
+// Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+// IMPORTANT: material builder can run many times during scene load; keep debug opt-in.
+const USDDEBUG =
+  (() => {
+    try {
+      if (typeof window === 'undefined') return false;
+      const q = new URLSearchParams((window as any).location?.search ?? '');
+      if (q.get('usddebug') === '1') return true;
+      if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  })();
+
+const dbg = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.log('[usdjs-viewer:UsdPreviewSurface]', ...args);
+};
+
+const warned = new Set<string>();
+const warnOnce = (key: string, ...args: any[]) => {
+  if (warned.has(key)) return;
+  warned.add(key);
+  // eslint-disable-next-line no-console
+  console.warn(...args);
+};
+
 export function createUsdPreviewSurfaceMaterial(opts: {
   shader: SdfPrimSpec;
   root: SdfPrimSpec;
@@ -33,12 +62,14 @@ export function createUsdPreviewSurfaceMaterial(opts: {
   } = opts;
 
   const inputs = extractShaderInputs(shader, materialPrim);
-  console.log('[NormalBiasScale DEBUG] createMaterialFromShader inputs:', {
-    diffuseColor: inputs.diffuseColor ? `rgb(${inputs.diffuseColor.r}, ${inputs.diffuseColor.g}, ${inputs.diffuseColor.b})` : 'none',
-    roughness: inputs.roughness,
-    metallic: inputs.metallic,
-    shaderPath: shader.path?.primPath,
-  });
+  if (USDDEBUG) {
+    dbg('[NormalBiasScale DEBUG] createMaterialFromShader inputs:', {
+      diffuseColor: inputs.diffuseColor ? `rgb(${inputs.diffuseColor.r}, ${inputs.diffuseColor.g}, ${inputs.diffuseColor.b})` : 'none',
+      roughness: inputs.roughness,
+      metallic: inputs.metallic,
+      shaderPath: shader.path?.primPath,
+    });
+  }
   const mat = new THREE.MeshPhysicalMaterial();
 
   mat.color.setHex(0xffffff);
@@ -58,13 +89,13 @@ export function createUsdPreviewSurfaceMaterial(opts: {
     (mat as any).vertexColors = true;
     mat.color.setHex(0xffffff);
     (mat as any).userData = { ...(mat as any).userData, usdDiffusePrimvar: pv.varname };
-    console.log('[NormalBiasScale DEBUG] Using vertex colors from primvar:', pv.varname);
+    if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Using vertex colors from primvar:', pv.varname);
   } else {
     if (inputs.diffuseColor) {
       mat.color.copy(inputs.diffuseColor);
-      console.log('[NormalBiasScale DEBUG] Set diffuseColor:', mat.color.getHexString());
+      if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Set diffuseColor:', mat.color.getHexString());
     } else {
-      console.log('[NormalBiasScale DEBUG] No diffuseColor input, keeping default white');
+      if (USDDEBUG) dbg('[NormalBiasScale DEBUG] No diffuseColor input, keeping default white');
     }
   }
   if (inputs.roughness !== undefined) mat.roughness = inputs.roughness;
@@ -137,14 +168,21 @@ export function createUsdPreviewSurfaceMaterial(opts: {
               mat.color.copy(tint);
 
               if (info.biasRgb && (info.biasRgb.r !== 0 || info.biasRgb.g !== 0 || info.biasRgb.b !== 0)) {
-                console.warn('UsdUVTexture inputs:bias is not supported for MeshPhysicalMaterial baseColor; ignoring bias=', info.biasRgb);
+                warnOnce(
+                  `bias:baseColor`,
+                  'UsdUVTexture inputs:bias is not supported for MeshPhysicalMaterial baseColor; ignoring bias=',
+                  info.biasRgb,
+                );
               }
 
               mat.needsUpdate = true;
             },
             undefined,
             (err: unknown) => {
-              console.error('Failed to load UsdPreviewSurface diffuse texture:', info.file, url, err);
+              if (USDDEBUG) {
+                // eslint-disable-next-line no-console
+                console.error('Failed to load UsdPreviewSurface diffuse texture:', info.file, url, err);
+              }
               // Fallback: many corpora use flat color swatch textures; if those are missing (404),
               // infer a reasonable constant base color from the filename so the model isn't fully gray/white.
               const guessed = guessSolidColorFromAssetPath(info.file);
@@ -152,7 +190,12 @@ export function createUsdPreviewSurfaceMaterial(opts: {
                 mat.map = null;
                 mat.color.copy(guessed);
                 mat.needsUpdate = true;
-                console.warn('UsdPreviewSurface diffuse texture missing; using guessed baseColor from filename:', info.file, guessed.getHexString());
+                warnOnce(
+                  `missing:diffuse:${String(info.file)}`,
+                  'UsdPreviewSurface diffuse texture missing; using guessed baseColor from filename:',
+                  info.file,
+                  guessed.getHexString(),
+                );
               }
             },
           );
@@ -199,12 +242,19 @@ export function createUsdPreviewSurfaceMaterial(opts: {
               mat.needsUpdate = true;
 
               if (info.biasRgb && (info.biasRgb.r !== 0 || info.biasRgb.g !== 0 || info.biasRgb.b !== 0)) {
-                console.warn('UsdUVTexture inputs:bias is not supported for opacity; ignoring bias=', info.biasRgb);
+                warnOnce(
+                  `bias:opacity`,
+                  'UsdUVTexture inputs:bias is not supported for opacity; ignoring bias=',
+                  info.biasRgb,
+                );
               }
             },
             undefined,
             (err: unknown) => {
-              console.error('Failed to load UsdPreviewSurface opacity texture:', info.file, url, err);
+              if (USDDEBUG) {
+                // eslint-disable-next-line no-console
+                console.error('Failed to load UsdPreviewSurface opacity texture:', info.file, url, err);
+              }
             },
           );
         }
@@ -228,7 +278,10 @@ export function createUsdPreviewSurfaceMaterial(opts: {
             },
             undefined,
             (err: unknown) => {
-              console.error('Failed to load UsdPreviewSurface clearcoat texture:', info.file, url, err);
+              if (USDDEBUG) {
+                // eslint-disable-next-line no-console
+                console.error('Failed to load UsdPreviewSurface clearcoat texture:', info.file, url, err);
+              }
             },
           );
           if (inputs.clearcoat === undefined) mat.clearcoat = 1.0;
@@ -276,7 +329,10 @@ export function createUsdPreviewSurfaceMaterial(opts: {
             },
             undefined,
             (err: unknown) => {
-              console.error('Failed to load UsdPreviewSurface emissive texture:', info.file, url, err);
+              if (USDDEBUG) {
+                // eslint-disable-next-line no-console
+                console.error('Failed to load UsdPreviewSurface emissive texture:', info.file, url, err);
+              }
             },
           );
         }

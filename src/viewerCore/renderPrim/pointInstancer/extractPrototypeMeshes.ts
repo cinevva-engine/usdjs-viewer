@@ -4,6 +4,26 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 import type { SceneNode } from '../../types';
 import { buildPointInstancerProtoNode } from './protoNode';
 
+// Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+const USDDEBUG =
+  (() => {
+    try {
+      if (typeof window === 'undefined') return false;
+      const q = new URLSearchParams((window as any).location?.search ?? '');
+      if (q.get('usddebug') === '1') return true;
+      if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  })();
+
+const dbg = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.log('[usdjs-viewer:PointInstancer]', ...args);
+};
+
 export function extractPointInstancerPrototypeMeshes(opts: {
   protoPrim: SdfPrimSpec;
   protoPath: string;
@@ -75,8 +95,10 @@ export function extractPointInstancerPrototypeMeshes(opts: {
   // which should resolve relative to the prototype, not the stage root.
   const tempContainer = new THREE.Object3D();
   (protoNode as any).__prototypeRoot = protoPrim; // Pass prototype root for material resolution
-  console.log(`[PointInstancer] Setting __prototypeRoot=${protoPrim.path?.primPath} for protoNode=${protoNode.path}`);
-  console.log(`[PointInstancer] protoNode children:`, protoNode.children.map((c) => c.path));
+  if (USDDEBUG) {
+    dbg(`[PointInstancer] Setting __prototypeRoot=${protoPrim.path?.primPath} for protoNode=${protoNode.path}`);
+    dbg(`[PointInstancer] protoNode children:`, protoNode.children.map((c) => c.path));
+  }
   renderPrim(
     tempContainer,
     helpersParent,
@@ -114,7 +136,11 @@ export function extractPointInstancerPrototypeMeshes(opts: {
         const matColor = (matToUse as any).color as THREE.Color;
         // Log if we see a green-ish color (for debugging tree_leaves)
         if (matColor.g > 0.2 && matColor.r < 0.1 && matColor.b < 0.1) {
-          console.log(`PointInstancer prototype mesh material color: r=${matColor.r}, g=${matColor.g}, b=${matColor.b}, obj.name=${obj.name}`);
+          if (USDDEBUG) {
+            dbg(
+              `PointInstancer prototype mesh material color: r=${matColor.r}, g=${matColor.g}, b=${matColor.b}, obj.name=${obj.name}`,
+            );
+          }
         }
       }
       meshesForThisProto.push({

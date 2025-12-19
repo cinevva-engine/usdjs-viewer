@@ -3,6 +3,37 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 
 import { findPrimByPath } from '../usdPaths';
 
+// Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+// IMPORTANT: StandardSurface resolution can run per-material and spam the console / slow loads.
+const USDDEBUG =
+    (() => {
+        try {
+            if (typeof window === 'undefined') return false;
+            const q = new URLSearchParams((window as any).location?.search ?? '');
+            if (q.get('usddebug') === '1') return true;
+            if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
+        } catch {
+            // ignore
+        }
+        return false;
+    })();
+
+const dbg = (...args: any[]) => {
+    if (!USDDEBUG) return;
+    // eslint-disable-next-line no-console
+    console.log('[usdjs-viewer:StandardSurface]', ...args);
+};
+const dbgWarn = (...args: any[]) => {
+    if (!USDDEBUG) return;
+    // eslint-disable-next-line no-console
+    console.warn('[usdjs-viewer:StandardSurface]', ...args);
+};
+const dbgError = (...args: any[]) => {
+    if (!USDDEBUG) return;
+    // eslint-disable-next-line no-console
+    console.error('[usdjs-viewer:StandardSurface]', ...args);
+};
+
 /**
  * Extract material inputs from a MaterialX Standard Surface shader (ND_standard_surface_surfaceshader).
  * Standard Surface has different input names than UsdPreviewSurface.
@@ -121,44 +152,44 @@ export function extractStandardSurfaceInputs(
     // Helper to resolve a texture file from a connected nodegraph
     // Standard Surface often connects to nodegraphs like: inputs:base_color.connect = </Mat/Brass/NG_brass1.outputs:out_color>
     const resolveConnectedTextureFile = (inputName: string): string | undefined => {
-        console.log(`[resolveConnectedTextureFile] inputName=${inputName}, shader properties:`, Array.from(shader.properties?.keys() ?? []));
+        if (USDDEBUG) dbg(`[resolveConnectedTextureFile] inputName=${inputName}, shader properties:`, Array.from(shader.properties?.keys() ?? []));
         const connectProp = shader.properties?.get(`${inputName}.connect`);
-        console.log(`[resolveConnectedTextureFile] connectProp for ${inputName}.connect:`, connectProp);
+        if (USDDEBUG) dbg(`[resolveConnectedTextureFile] connectProp for ${inputName}.connect:`, connectProp);
         const connDv: any = connectProp?.defaultValue;
         if (connDv && typeof connDv === 'object' && connDv.type === 'sdfpath' && typeof connDv.value === 'string') {
             const targetPath = connDv.value; // e.g. </Mat/Brass/NG_brass1.outputs:out_color>
-            console.log(`[resolveConnectedTextureFile] targetPath=${targetPath}`);
+            if (USDDEBUG) dbg(`[resolveConnectedTextureFile] targetPath=${targetPath}`);
             // Extract the prim path (before the last dot)
             const lastDot = targetPath.lastIndexOf('.');
             if (lastDot > 0 && root) {
                 const nodegraphPath = targetPath.substring(0, lastDot);
                 const outputName = targetPath.substring(lastDot + 1); // e.g. "outputs:out_color"
-                console.log(`[resolveConnectedTextureFile] nodegraphPath=${nodegraphPath}, outputName=${outputName}`);
+                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] nodegraphPath=${nodegraphPath}, outputName=${outputName}`);
                 const nodegraphPrim = findPrimByPath(root, nodegraphPath);
-                console.log(`[resolveConnectedTextureFile] nodegraphPrim=${nodegraphPrim?.path?.primPath}, typeName=${nodegraphPrim?.typeName}`);
+                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] nodegraphPrim=${nodegraphPrim?.path?.primPath}, typeName=${nodegraphPrim?.typeName}`);
                 if (nodegraphPrim && nodegraphPrim.typeName === 'NodeGraph') {
                     // Find what the nodegraph output connects to
-                    console.log(`[resolveConnectedTextureFile] nodegraph properties:`, Array.from(nodegraphPrim.properties?.keys() ?? []));
+                    if (USDDEBUG) dbg(`[resolveConnectedTextureFile] nodegraph properties:`, Array.from(nodegraphPrim.properties?.keys() ?? []));
                     const ngOutputProp = nodegraphPrim.properties?.get(`${outputName}.connect`);
-                    console.log(`[resolveConnectedTextureFile] ngOutputProp for ${outputName}.connect:`, ngOutputProp);
+                    if (USDDEBUG) dbg(`[resolveConnectedTextureFile] ngOutputProp for ${outputName}.connect:`, ngOutputProp);
                     const ngOutputDv: any = ngOutputProp?.defaultValue;
                     if (ngOutputDv && typeof ngOutputDv === 'object' && ngOutputDv.type === 'sdfpath' && typeof ngOutputDv.value === 'string') {
                         // Follow the connection to the image shader
                         const imageShaderPath = ngOutputDv.value;
-                        console.log(`[resolveConnectedTextureFile] imageShaderPath=${imageShaderPath}`);
+                        if (USDDEBUG) dbg(`[resolveConnectedTextureFile] imageShaderPath=${imageShaderPath}`);
                         const imageLastDot = imageShaderPath.lastIndexOf('.');
                         if (imageLastDot > 0) {
                             const imageShaderPrimPath = imageShaderPath.substring(0, imageLastDot);
                             const imageShaderPrim = findPrimByPath(root, imageShaderPrimPath);
-                            console.log(`[resolveConnectedTextureFile] imageShaderPrim=${imageShaderPrim?.path?.primPath}`);
+                            if (USDDEBUG) dbg(`[resolveConnectedTextureFile] imageShaderPrim=${imageShaderPrim?.path?.primPath}`);
                             if (imageShaderPrim) {
                                 // Get the file input from the image shader (ND_tiledimage_*)
-                                console.log(`[resolveConnectedTextureFile] imageShader properties:`, Array.from(imageShaderPrim.properties?.keys() ?? []));
+                                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] imageShader properties:`, Array.from(imageShaderPrim.properties?.keys() ?? []));
                                 const fileProp = imageShaderPrim.properties?.get('inputs:file');
                                 const fileDv: any = fileProp?.defaultValue;
-                                console.log(`[resolveConnectedTextureFile] fileDv:`, fileDv);
+                                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] fileDv:`, fileDv);
                                 if (fileDv && typeof fileDv === 'object' && fileDv.type === 'asset' && typeof fileDv.value === 'string') {
-                                    console.log(`[resolveConnectedTextureFile] FOUND texture file: ${fileDv.value}`);
+                                    if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file: ${fileDv.value}`);
                                     return fileDv.value;
                                 }
 
@@ -167,20 +198,20 @@ export function extractStandardSurfaceInputs(
                                 // Check for inputs:in.connect (normalmap node) or similar intermediate nodes
                                 const inProp = imageShaderPrim.properties?.get('inputs:in.connect');
                                 const inDv: any = inProp?.defaultValue;
-                                console.log(`[resolveConnectedTextureFile] checking for intermediate node (normalmap), inputs:in.connect:`, inDv);
+                                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] checking for intermediate node (normalmap), inputs:in.connect:`, inDv);
                                 if (inDv && typeof inDv === 'object' && inDv.type === 'sdfpath' && typeof inDv.value === 'string') {
                                     const intermediateTargetPath = inDv.value;
                                     const intermediateLastDot = intermediateTargetPath.lastIndexOf('.');
                                     if (intermediateLastDot > 0) {
                                         const realImagePrimPath = intermediateTargetPath.substring(0, intermediateLastDot);
                                         const realImagePrim = findPrimByPath(root, realImagePrimPath);
-                                        console.log(`[resolveConnectedTextureFile] real image prim path=${realImagePrimPath}, found=${realImagePrim?.path?.primPath}`);
+                                        if (USDDEBUG) dbg(`[resolveConnectedTextureFile] real image prim path=${realImagePrimPath}, found=${realImagePrim?.path?.primPath}`);
                                         if (realImagePrim) {
                                             const realFileProp = realImagePrim.properties?.get('inputs:file');
                                             const realFileDv: any = realFileProp?.defaultValue;
-                                            console.log(`[resolveConnectedTextureFile] real image file:`, realFileDv);
+                                            if (USDDEBUG) dbg(`[resolveConnectedTextureFile] real image file:`, realFileDv);
                                             if (realFileDv && typeof realFileDv === 'object' && realFileDv.type === 'asset' && typeof realFileDv.value === 'string') {
-                                                console.log(`[resolveConnectedTextureFile] FOUND texture file via intermediate node: ${realFileDv.value}`);
+                                                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file via intermediate node: ${realFileDv.value}`);
                                                 return realFileDv.value;
                                             }
                                         }
@@ -192,7 +223,7 @@ export function extractStandardSurfaceInputs(
                 }
             }
         }
-        console.log(`[resolveConnectedTextureFile] No texture found for ${inputName}`);
+        if (USDDEBUG) dbg(`[resolveConnectedTextureFile] No texture found for ${inputName}`);
         return undefined;
     };
 
@@ -265,15 +296,17 @@ export function createStandardSurfaceMaterial(opts: {
     const { shader, root, resolveAssetUrl, materialPrim } = opts;
 
     const inputs = extractStandardSurfaceInputs(shader, materialPrim, root);
-    console.warn('[StandardSurface] inputs:', JSON.stringify({
-        baseColor: inputs.baseColor?.getHexString(),
-        diffuseTextureFile: inputs.diffuseTextureFile,
-        roughnessTextureFile: inputs.roughnessTextureFile,
-        metalness: inputs.metalness,
-        roughness: inputs.roughness,
-        transmission: inputs.transmission,
-        transmissionColor: inputs.transmissionColor?.getHexString(),
-    }));
+    if (USDDEBUG) {
+        dbgWarn('[StandardSurface] inputs:', JSON.stringify({
+            baseColor: inputs.baseColor?.getHexString(),
+            diffuseTextureFile: inputs.diffuseTextureFile,
+            roughnessTextureFile: inputs.roughnessTextureFile,
+            metalness: inputs.metalness,
+            roughness: inputs.roughness,
+            transmission: inputs.transmission,
+            transmissionColor: inputs.transmissionColor?.getHexString(),
+        }));
+    }
     const mat = new THREE.MeshPhysicalMaterial();
 
     mat.color.setHex(0xffffff);
@@ -314,22 +347,22 @@ export function createStandardSurfaceMaterial(opts: {
     }
 
     // Load diffuse texture from nodegraph connection
-    console.warn('[StandardSurface] diffuseTextureFile:', inputs.diffuseTextureFile, 'resolveAssetUrl:', !!resolveAssetUrl);
+    if (USDDEBUG) dbgWarn('[StandardSurface] diffuseTextureFile:', inputs.diffuseTextureFile, 'resolveAssetUrl:', !!resolveAssetUrl);
     if (inputs.diffuseTextureFile && resolveAssetUrl) {
         const url = resolveAssetUrl(inputs.diffuseTextureFile);
-        console.warn('[StandardSurface] resolved diffuse URL:', url);
+        if (USDDEBUG) dbgWarn('[StandardSurface] resolved diffuse URL:', url);
         if (url) {
             new THREE.TextureLoader().load(
                 url,
                 (tex: any) => {
-                    console.warn('[StandardSurface] Diffuse texture LOADED successfully:', inputs.diffuseTextureFile);
+                    if (USDDEBUG) dbgWarn('[StandardSurface] Diffuse texture LOADED successfully:', inputs.diffuseTextureFile);
                     tex.colorSpace = THREE.SRGBColorSpace;
                     mat.map = tex;
                     mat.needsUpdate = true;
                 },
                 undefined,
                 (err: unknown) => {
-                    console.error('Failed to load Standard Surface diffuse texture:', inputs.diffuseTextureFile, url, err);
+                    if (USDDEBUG) dbgError('Failed to load Standard Surface diffuse texture:', inputs.diffuseTextureFile, url, err);
                 },
             );
         }
@@ -348,7 +381,7 @@ export function createStandardSurfaceMaterial(opts: {
                 },
                 undefined,
                 (err: unknown) => {
-                    console.error('Failed to load Standard Surface roughness texture:', inputs.roughnessTextureFile, url, err);
+                    if (USDDEBUG) dbgError('Failed to load Standard Surface roughness texture:', inputs.roughnessTextureFile, url, err);
                 },
             );
         }
@@ -364,11 +397,11 @@ export function createStandardSurfaceMaterial(opts: {
                     tex.colorSpace = THREE.NoColorSpace;
                     mat.normalMap = tex;
                     mat.needsUpdate = true;
-                    console.log('[StandardSurface] Normal texture loaded successfully:', inputs.normalTextureFile);
+                    if (USDDEBUG) dbg('[StandardSurface] Normal texture loaded successfully:', inputs.normalTextureFile);
                 },
                 undefined,
                 (err: unknown) => {
-                    console.error('Failed to load Standard Surface normal texture:', inputs.normalTextureFile, url, err);
+                    if (USDDEBUG) dbgError('Failed to load Standard Surface normal texture:', inputs.normalTextureFile, url, err);
                 },
             );
         }
