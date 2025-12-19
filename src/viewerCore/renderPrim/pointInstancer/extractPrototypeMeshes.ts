@@ -101,13 +101,17 @@ export function extractPointInstancerPrototypeMeshes(opts: {
   const meshesForThisProto: Array<{ geom: THREE.BufferGeometry; mat: THREE.Material }> = [];
   tempContainer.traverse((obj: THREE.Object3D) => {
     if (obj instanceof THREE.Mesh && obj.geometry && obj.material) {
-      const originalMat = Array.isArray(obj.material) ? obj.material[0]! : obj.material;
-      const clonedMat = originalMat.clone();
-      // Ensure material properties are properly copied (Three.js clone should handle this, but ensure needsUpdate is set)
-      clonedMat.needsUpdate = true;
+      // IMPORTANT: do NOT clone materials here.
+      //
+      // Many materials (especially MaterialX/UsdPreviewSurface) load textures asynchronously.
+      // If we clone before textures arrive, the instanced prototype will stay stuck with the
+      // "pre-load" gray fallback, while non-instanced prims update correctly once textures load.
+      //
+      // For PointInstancer prototypes we want materials to stay live so texture updates propagate.
+      const matToUse = Array.isArray(obj.material) ? obj.material[0]! : obj.material;
       // Debug: verify material color is preserved (especially for tree_leaves green color)
-      if ('color' in clonedMat && (clonedMat as any).color) {
-        const matColor = (clonedMat as any).color as THREE.Color;
+      if ('color' in matToUse && (matToUse as any).color) {
+        const matColor = (matToUse as any).color as THREE.Color;
         // Log if we see a green-ish color (for debugging tree_leaves)
         if (matColor.g > 0.2 && matColor.r < 0.1 && matColor.b < 0.1) {
           console.log(`PointInstancer prototype mesh material color: r=${matColor.r}, g=${matColor.g}, b=${matColor.b}, obj.name=${obj.name}`);
@@ -115,7 +119,7 @@ export function extractPointInstancerPrototypeMeshes(opts: {
       }
       meshesForThisProto.push({
         geom: (obj.geometry as THREE.BufferGeometry).clone(),
-        mat: clonedMat,
+        mat: matToUse,
       });
     }
   });
