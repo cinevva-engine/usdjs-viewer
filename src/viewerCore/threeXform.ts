@@ -13,6 +13,10 @@ import { getPrimProp, getPrimPropAtTime, propHasAnimation, sdfToNumberTuple } fr
  * Translation is stored in column 4 (indices 12-14 in column-major storage).
  *
  * To convert, we transpose the USD matrix.
+ *
+ * References:
+ * - Autodesk maya-usd transform stack notes (row/col math recap): `https://github.com/autodesk/maya-usd/blob/dev/doc/UsdTransformsStack.md`
+ * - three.js Matrix4 conventions: `https://threejs.org/manual/en/matrix-transformations.html`
  */
 export function parseMatrix4dArray(v: SdfValue | undefined): THREE.Matrix4[] | null {
     if (!v || typeof v !== 'object' || v.type !== 'array') return null;
@@ -51,6 +55,10 @@ export function parseMatrix4dArray(v: SdfValue | undefined): THREE.Matrix4[] | n
  * USD uses row-vector convention where transforms are applied as v' = v * M.
  * Three.js uses column-vector convention where transforms are applied as v' = M * v.
  * To convert, we transpose the USD matrix.
+ *
+ * References:
+ * - Autodesk maya-usd transform stack notes (row/col math recap): `https://github.com/autodesk/maya-usd/blob/dev/doc/UsdTransformsStack.md`
+ * - three.js Matrix4 conventions: `https://threejs.org/manual/en/matrix-transformations.html`
  */
 export function parseMatrix4d(v: SdfValue | undefined): THREE.Matrix4 | null {
     if (!v || typeof v !== 'object' || v.type !== 'tuple' || v.value.length !== 4) return null;
@@ -189,6 +197,188 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         return null;
     };
 
+    // Compose xformOpOrder in USD's native convention (row-vectors, row-major).
+    // Then convert once to Three.js (column-vectors) by transposing.
+    //
+    // This avoids subtle left/right multiplication and Euler-order mistakes, and is required
+    // for complex stacks with pivots + !invert! + matrix ops (e.g. complex_transform.usda).
+    type UsdRows4 = [number[], number[], number[], number[]]; // each row length 4
+
+    const usdIdentityRows = (): UsdRows4 => ([
+        [1, 0, 0, 0],
+        [0, 1, 0, 0],
+        [0, 0, 1, 0],
+        [0, 0, 0, 1],
+    ]);
+
+    const usdRowsToThreeMatrix = (rows: UsdRows4): THREE.Matrix4 => {
+        // USD rows are row-major for row-vector convention.
+        // Convert to Three column-vector matrix by transposing.
+        const m = new THREE.Matrix4();
+        m.set(
+            rows[0][0], rows[1][0], rows[2][0], rows[3][0],
+            rows[0][1], rows[1][1], rows[2][1], rows[3][1],
+            rows[0][2], rows[1][2], rows[2][2], rows[3][2],
+            rows[0][3], rows[1][3], rows[2][3], rows[3][3],
+        );
+        return m;
+    };
+
+    const threeMatrixToUsdRows = (mCol: THREE.Matrix4): UsdRows4 => {
+        // Three's `elements` is column-major: e[col*4 + row]
+        // USD rows = transpose(mCol): rows[r][c] = mCol[c][r]
+        const e = mCol.elements;
+        return [
+            [e[0], e[4], e[8], e[12]],
+            [e[1], e[5], e[9], e[13]],
+            [e[2], e[6], e[10], e[14]],
+            [e[3], e[7], e[11], e[15]],
+        ];
+    };
+
+    const usdMulRows = (a: UsdRows4, b: UsdRows4): UsdRows4 => {
+        // Standard matrix multiply for row-major storage: out = a * b
+        const out: UsdRows4 = usdIdentityRows();
+        for (let r = 0; r < 4; r++) {
+            for (let c = 0; c < 4; c++) {
+                out[r][c] =
+                    a[r][0]! * b[0][c]! +
+                    a[r][1]! * b[1][c]! +
+                    a[r][2]! * b[2][c]! +
+                    a[r][3]! * b[3][c]!;
+            }
+        }
+        return out;
+    };
+
+    const usdInvertRows = (rows: UsdRows4): UsdRows4 | null => {
+        // Convert to Three, invert there, then transpose back to USD rows.
+        const mCol = usdRowsToThreeMatrix(rows);
+        const det = mCol.determinant();
+        if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+        const invCol = mCol.clone().invert();
+        return threeMatrixToUsdRows(invCol);
+    };
+
+    const readUsdMatrixRows = (v: SdfValue | undefined): UsdRows4 | null => {
+        if (!v || typeof v !== 'object' || v.type !== 'tuple' || v.value.length !== 4) return null;
+        const rows: number[][] = [];
+        for (const row of v.value) {
+            if (!row || typeof row !== 'object' || row.type !== 'tuple' || row.value.length !== 4) return null;
+            const nums = row.value.map((n: any) => (typeof n === 'number' ? n : 0));
+            rows.push(nums);
+        }
+        return [rows[0]!, rows[1]!, rows[2]!, rows[3]!];
+    };
+
+    const usdTranslateRows = (tx: number, ty: number, tz: number): UsdRows4 => {
+        const m = usdIdentityRows();
+        // Row-vector translation: translation lives in last row (row 4).
+        m[3][0] = tx;
+        m[3][1] = ty;
+        m[3][2] = tz;
+        return m;
+    };
+
+    const usdScaleRows = (sx: number, sy: number, sz: number): UsdRows4 => ([
+        [sx, 0, 0, 0],
+        [0, sy, 0, 0],
+        [0, 0, sz, 0],
+        [0, 0, 0, 1],
+    ]);
+
+    const usdRotateXRows = (deg: number): UsdRows4 => {
+        const r = THREE.MathUtils.degToRad(deg);
+        const c = Math.cos(r);
+        const s = Math.sin(r);
+        // Row-vector rotation = transpose(column-vector rotation)
+        return [
+            [1, 0, 0, 0],
+            [0, c, s, 0],
+            [0, -s, c, 0],
+            [0, 0, 0, 1],
+        ];
+    };
+
+    const usdRotateYRows = (deg: number): UsdRows4 => {
+        const r = THREE.MathUtils.degToRad(deg);
+        const c = Math.cos(r);
+        const s = Math.sin(r);
+        return [
+            [c, 0, -s, 0],
+            [0, 1, 0, 0],
+            [s, 0, c, 0],
+            [0, 0, 0, 1],
+        ];
+    };
+
+    const usdRotateZRows = (deg: number): UsdRows4 => {
+        const r = THREE.MathUtils.degToRad(deg);
+        const c = Math.cos(r);
+        const s = Math.sin(r);
+        return [
+            [c, s, 0, 0],
+            [-s, c, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ];
+    };
+
+    const usdRotateXYZRows = (degX: number, degY: number, degZ: number): UsdRows4 => {
+        // USD rotateXYZ applies X then Y then Z in its native (row-vector) convention.
+        // So the op matrix is: Rx * Ry * Rz (right-multiply chain).
+        return usdMulRows(usdMulRows(usdRotateXRows(degX), usdRotateYRows(degY)), usdRotateZRows(degZ));
+    };
+
+    const usdRowsForOp = (opName: string): UsdRows4 | null => {
+        // Matrix op: already in USD row-major.
+        if (opName.startsWith('xformOp:transform')) {
+            const rows = readUsdMatrixRows(getVal(opName));
+            if (!rows) return null;
+            if (unitScale !== 1.0) {
+                rows[3][0] *= unitScale;
+                rows[3][1] *= unitScale;
+                rows[3][2] *= unitScale;
+            }
+            return rows;
+        }
+
+        // Translate-like ops (translate/pivots/offsets)
+        if (isTranslateLike(opName)) {
+            const v = vec3For(opName);
+            if (!v) return null;
+            return usdTranslateRows(v[0] * unitScale, v[1] * unitScale, v[2] * unitScale);
+        }
+
+        if (opName.startsWith('xformOp:scale')) {
+            const v = vec3For(opName);
+            if (!v) return null;
+            return usdScaleRows(v[0], v[1], v[2]);
+        }
+
+        if (opName.startsWith('xformOp:rotateXYZ')) {
+            const v = vec3For(opName);
+            if (!v) return null;
+            return usdRotateXYZRows(v[0], v[1], v[2]);
+        }
+        if (opName.startsWith('xformOp:rotateX')) {
+            const d = scalarFor(opName);
+            if (d === null) return null;
+            return usdRotateXRows(d);
+        }
+        if (opName.startsWith('xformOp:rotateY')) {
+            const d = scalarFor(opName);
+            if (d === null) return null;
+            return usdRotateYRows(d);
+        }
+        if (opName.startsWith('xformOp:rotateZ')) {
+            const d = scalarFor(opName);
+            if (d === null) return null;
+            return usdRotateZRows(d);
+        }
+        return null;
+    };
+
     // Fast-path: the common TRS order (translate, rotateXYZ, scale) should map cleanly to Three.js.
     // This keeps simple samples (like usd-wg-assets `simple_transform.usda`) behaving predictably
     // while we iterate on full xformOpOrder matrix semantics for complex pivot/shear stacks.
@@ -228,10 +418,9 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
     }
 
     // If xformOpOrder is present, honor it by composing a full matrix stack.
-    // NOTE: In practice, treating the authored order as a post-multiply chain matches
-    // the usd-wg-assets schema test reference renders (pivots/offsets/inverses).
+    // Compose in USD convention (row-vectors) and transpose once into Three.
     if (order.length) {
-        const composed = new THREE.Matrix4().identity();
+        let composedRows: UsdRows4 = usdIdentityRows();
         let any = false;
         for (const token of order) {
             let invert = false;
@@ -240,14 +429,17 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
                 invert = true;
                 opName = opName.slice('!invert!'.length);
             }
-            const m = matrixForOp(opName);
-            if (!m) continue;
-            if (invert) m.invert();
-            composed.multiply(m);
+            const rows = usdRowsForOp(opName);
+            if (!rows) continue;
+            const rowsToApply = invert ? usdInvertRows(rows) : rows;
+            if (!rowsToApply) continue;
+            // Row-vector chaining: v' = v * (M1 * M2 * ...), so right-multiply in authored order.
+            composedRows = usdMulRows(composedRows, rowsToApply);
             any = true;
         }
 
         if (any) {
+            const composed = usdRowsToThreeMatrix(composedRows);
             obj.matrixAutoUpdate = false;
             obj.matrix.copy(composed);
             // Keep position/quaternion/scale roughly in-sync for tooling/inspection.

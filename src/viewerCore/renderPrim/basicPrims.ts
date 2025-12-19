@@ -20,6 +20,11 @@ export function renderBasicUsdPrimitive(opts: {
   applyPrimitiveDefaults: (mat: THREE.Material, prim: SdfPrimSpec) => void;
 }): boolean {
   const { typeName, prim, container, unitScale, getPrimProp, resolveMaterial, applyPrimitiveDefaults } = opts;
+  // USD primitive defaults:
+  // - This viewer tries to match USD schema defaults when attributes are omitted (e.g. Cube.size).
+  // - Cross-check: usd-wg-assets schema tests under:
+  //   `packages/usdjs/test/corpus/external/usd-wg-assets/assets-main/test_assets/schemaTests/usdGeom/primitives/*.usda`
+  // - API docs (mirror): `https://docs.omniverse.nvidia.com/kit/docs/usdrt.scenegraph/latest/api/`
 
   if (typeName === 'Sphere') {
     const radiusVal = getPrimProp(prim, 'radius');
@@ -35,7 +40,14 @@ export function renderBasicUsdPrimitive(opts: {
   }
   if (typeName === 'Cube') {
     const sizeVal = getPrimProp(prim, 'size');
-    const size = (typeof sizeVal === 'number' ? sizeVal : 1) * unitScale;
+    // USD `UsdGeomCube.size` default is 2 (cube spans [-1, +1] when size is 2).
+    // Using 1 here makes authored transform stacks (like `_common/axis.usda`) appear "pulled apart"
+    // relative to usdrecord/USD, because translations were authored assuming the default size.
+    //
+    // References:
+    // - usd-wg-assets schema test: `.../schemaTests/usdGeom/primitives/cube.usda` authors `double size = 2`
+    // - API docs mirror: `https://docs.omniverse.nvidia.com/kit/docs/usdrt.scenegraph/latest/api/classusdrt_1_1_usd_geom_cube.html`
+    const size = (typeof sizeVal === 'number' ? sizeVal : 2) * unitScale;
     const geo = new THREE.BoxGeometry(size, size, size);
     const mat = resolveMaterial(prim);
     applyPrimitiveDefaults(mat, prim);
