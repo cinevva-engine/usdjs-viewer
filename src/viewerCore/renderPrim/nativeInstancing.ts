@@ -4,6 +4,54 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 import type { AnimatedObject, SceneNode } from '../types';
 import { findPrimByPath } from '../usdPaths';
 
+// Cache rendered prototype Object3Ds keyed by prototype prim path.
+// This is critical for scenes like usd-wg-assets `simpleAssetScene.usd` which author hundreds of
+// instanceable prims referencing the same external asset. Our composition pipeline rewrites those
+// external references into internal prototype prims under `/__usdjs_prototypes/*`.
+//
+// Without caching, we end up re-rendering the full prototype subtree for every instance, which is
+// extremely slow and defeats the point of instancing.
+const prototypeObjectCache = new Map<string, THREE.Object3D>();
+
+function cloneObjectShared(obj: THREE.Object3D): THREE.Object3D {
+  // Create a shallow clone of the scene graph while SHARING geometries/materials.
+  // This is much cheaper than re-running renderPrim and avoids duplicating GPU resources.
+  const anyObj: any = obj as any;
+  let out: THREE.Object3D;
+  if (anyObj.isMesh) {
+    out = new THREE.Mesh(anyObj.geometry, anyObj.material);
+    (out as any).castShadow = anyObj.castShadow;
+    (out as any).receiveShadow = anyObj.receiveShadow;
+  } else if (anyObj.isSkinnedMesh) {
+    // Fallback: SkinnedMesh cloning is non-trivial; keep slow path if we ever hit it.
+    // (simpleAssetScene is static meshes.)
+    out = obj.clone(true);
+    return out;
+  } else if (anyObj.isPoints) {
+    out = new THREE.Points(anyObj.geometry, anyObj.material);
+  } else if (anyObj.isLineSegments) {
+    out = new THREE.LineSegments(anyObj.geometry, anyObj.material);
+  } else if (anyObj.isLine) {
+    out = new THREE.Line(anyObj.geometry, anyObj.material);
+  } else {
+    out = new THREE.Object3D();
+  }
+
+  out.name = obj.name;
+  out.visible = obj.visible;
+  out.frustumCulled = (obj as any).frustumCulled ?? true;
+  out.position.copy(obj.position);
+  out.quaternion.copy(obj.quaternion);
+  out.scale.copy(obj.scale);
+  out.matrixAutoUpdate = obj.matrixAutoUpdate;
+  if (!obj.matrixAutoUpdate) out.matrix.copy(obj.matrix);
+
+  for (const child of obj.children) {
+    out.add(cloneObjectShared(child));
+  }
+  return out;
+}
+
 export type RenderPrimLike = (
   objParent: THREE.Object3D,
   helpersParent: THREE.Object3D,
@@ -109,6 +157,53 @@ export function applyNativeUsdInstancingExpansion(opts: {
         }
 
         if (targetPrim) {
+          // Fast path: our composer rewrites external instanceable references into a prototype prim
+          // under `/__usdjs_prototypes/*`. In that case, render the prototype ONCE and then
+          // attach cheap shared-geometry clones for each instance.
+          if (targetPath.startsWith('/__usdjs_prototypes/')) {
+            let protoObj = prototypeObjectCache.get(targetPath);
+            if (!protoObj) {
+              const safeRefName = targetPath.replaceAll('/', '_');
+              const refRootPath = `${targetPath}.__render__${safeRefName}`;
+              const buildRefNode = (prim: SdfPrimSpec, curPath: string): SceneNode => {
+                const children: SceneNode[] = [];
+                if (prim.children) {
+                  for (const [name, child] of prim.children) {
+                    const childPath = curPath === '/' ? '/' + name : curPath + '/' + name;
+                    children.push(buildRefNode(child, childPath));
+                  }
+                }
+                return { path: curPath, typeName: prim.typeName, prim, children };
+              };
+              const protoContainer = new THREE.Object3D();
+              const refNode = buildRefNode(targetPrim, refRootPath);
+              (refNode as any).__prototypeRoot = prototypeRootForMaterials;
+              renderPrim(
+                protoContainer,
+                helpersParent,
+                refNode,
+                null,
+                helpers,
+                rootPrim,
+                sceneRef,
+                hasUsdLightsRef,
+                hasUsdDomeLightRef,
+                resolveAssetUrl,
+                unitScale,
+                dynamicHelperUpdates,
+                skeletonsToUpdate,
+                domeEnv,
+                currentIdentifier,
+                animatedObjects,
+              );
+              protoObj = protoContainer;
+              prototypeObjectCache.set(targetPath, protoObj);
+            }
+
+            container.add(cloneObjectShared(protoObj));
+            return;
+          }
+
           const safeRefName = targetPath.replaceAll('/', '_');
           const refRootPath = `${node.path}.__ref__${safeRefName}`;
 
