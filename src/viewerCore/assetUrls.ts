@@ -9,6 +9,13 @@ export function createResolveAssetUrl(opts: {
       if (assetPath.match(/^https?:\/\//)) {
         return `/__usdjs_proxy?url=${encodeURIComponent(assetPath)}`;
       }
+      // If the assetPath is already an absolute-ish corpus path, don't re-resolve it.
+      // This is important for MaterialX-derived textures where we may normalize filenames
+      // to `packages/usdjs/.../tex/foo.jpg`.
+      if (assetPath.startsWith('packages/usdjs/')) {
+        const rel = assetPath.slice('packages/usdjs/'.length);
+        return `/__usdjs_corpus?file=${encodeURIComponent(rel)}`;
+      }
       // Use the provided identifier, or fall back to currentIdentifier.
       // Important: viewer "corpus" entries often prefix identifiers with `[corpus]`,
       // but USD asset resolution should operate on the real underlying path.

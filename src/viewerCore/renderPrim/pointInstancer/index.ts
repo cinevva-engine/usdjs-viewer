@@ -86,8 +86,13 @@ export function renderPointInstancerPrim(opts: {
         quats.push(new THREE.Quaternion()); // identity fallback
         continue;
       }
-      const [x, y, z, w] = el.value;
-      // USD quath (half-precision) identity is often (0,0,0,0) or (0,0,0,1). Normalize to Three.js format.
+      // USD `quath` is authored as (real, i, j, k) == (w, x, y, z).
+      // Three.js expects (x, y, z, w).
+      //
+      // If we treat USD values as (x,y,z,w), identity (1,0,0,0) becomes a 180° flip (w=0),
+      // which is exactly what happens in OpenChessSet pawn instancing.
+      const [w, x, y, z] = el.value;
+      // USD quath identity is commonly (1,0,0,0). Some sources also serialize (0,0,0,0); treat that as identity too.
       if (typeof x === 'number' && typeof y === 'number' && typeof z === 'number' && typeof w === 'number') {
         const q = new THREE.Quaternion(x, y, z, w);
         // If all components are 0, treat as identity.
