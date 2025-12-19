@@ -16,11 +16,28 @@ export function frameToFit(opts: {
 
   const box = new THREE.Box3();
 
+  const isAxisHelper = (obj: THREE.Object3D): boolean => {
+    // usd-wg-assets transform samples commonly reference `_common/axis.usda` under an `axis` prim:
+    //   over "axis" ( references = @.../axis.usda@ ) { }
+    //
+    // Those axis bars are debug helpers; including them in auto-framing can dramatically zoom out
+    // and make the actual content look "moved far away" compared to usdrecord reference images.
+    // We treat anything under a prim path segment `/axis` as a helper and exclude it from bounds.
+    let cur: THREE.Object3D | null = obj;
+    while (cur) {
+      const n = cur.name ?? '';
+      if (typeof n === 'string' && (n === '/World/axis' || n.endsWith('/axis') || n.includes('/axis/'))) return true;
+      cur = cur.parent;
+    }
+    return false;
+  };
+
   // Compute bounding box of all geometry in contentRoot
   contentRoot.traverse((obj) => {
     if (obj instanceof THREE.Mesh || obj instanceof THREE.SkinnedMesh ||
       obj instanceof THREE.Points || obj instanceof THREE.Line ||
       obj instanceof THREE.LineSegments) {
+      if (isAxisHelper(obj)) return;
       const geometry = (obj as any).geometry as THREE.BufferGeometry | undefined;
       if (geometry) {
         geometry.computeBoundingBox();

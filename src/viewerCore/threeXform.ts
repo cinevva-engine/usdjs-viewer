@@ -117,15 +117,18 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
     };
 
     const isTranslateLike = (opName: string): boolean => {
-        // Besides canonical `xformOp:translate*`, USD also uses translate-typed ops with
-        // rotate/scale "offset" naming, e.g.:
-        // - xformOp:rotateXYZ:rotateOffset
-        // - xformOp:scale:scaleOffset
-        // In the schema test corpus, these are float3 values and should be applied as translations.
+        // Most translations are authored as `xformOp:translate:*`.
+        //
+        // usd-wg-assets schema test `complex_transform.usda` also uses the names:
+        // - `xformOp:rotateXYZ:rotateOffset` (float3)
+        // - `xformOp:scale:scaleOffset` (float3)
+        // as translation-like offsets in the stack.
+        //
+        // Treat those as translations for compatibility with the corpus reference renders.
         return (
             opName.startsWith('xformOp:translate') ||
-            opName.includes(':rotateOffset') ||
-            opName.includes(':scaleOffset')
+            opName.endsWith(':rotateOffset') ||
+            opName.endsWith(':scaleOffset')
         );
     };
 
@@ -431,9 +434,10 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
             if (!rows) continue;
             const rowsToApply = invert ? usdInvertRows(rows) : rows;
             if (!rowsToApply) continue;
-            // USD `xformOpOrder` is authored outer-to-inner (common stacks list translate before rotate before scale).
-            // To apply ops in the authored order under row-vector convention, we pre-multiply here.
-            // This matches the usd-wg-assets transform reference renders for complex stacks.
+            // For the usd-wg-assets `complex_transform.usda` stack, treating `xformOpOrder` as
+            // an outer-to-inner stack matches the reference renders: compose by pre-multiplying.
+            // (This is also consistent with how the simple stack `["translate","rotate","scale"]`
+            // is commonly interpreted as T * R * S.)
             composedRows = usdMulRows(rowsToApply, composedRows);
             any = true;
         }
