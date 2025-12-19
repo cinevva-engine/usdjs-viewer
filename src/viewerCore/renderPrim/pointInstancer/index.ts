@@ -79,23 +79,38 @@ export function renderPointInstancerPrim(opts: {
   const protoIndices = parseNumberArray(getPrimProp(node.prim, 'protoIndices'));
   const orientations = (() => {
     const oriProp = getPrimProp(node.prim, 'orientations');
-    if (!oriProp || typeof oriProp !== 'object' || oriProp.type !== 'array') return null;
+    if (!oriProp || typeof oriProp !== 'object') return null;
+
+    // Fast path: packed typed array (flat wxyz per instance)
+    if ((oriProp as any).type === 'typedArray' && ((oriProp as any).elementType === 'quath' || (oriProp as any).elementType === 'quatf' || (oriProp as any).elementType === 'quatd')) {
+      const data: any = (oriProp as any).value;
+      if (!(data instanceof Float32Array) && !(data instanceof Float64Array)) return null;
+      if (data.length % 4 !== 0) return null;
+      const quats: THREE.Quaternion[] = [];
+      for (let i = 0; i < data.length; i += 4) {
+        const w = data[i + 0]!, x = data[i + 1]!, y = data[i + 2]!, z = data[i + 3]!;
+        if (Number.isFinite(w) && Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+          const q = new THREE.Quaternion(x, y, z, w);
+          if (q.x === 0 && q.y === 0 && q.z === 0 && q.w === 0) q.set(0, 0, 0, 1);
+          quats.push(q);
+        } else {
+          quats.push(new THREE.Quaternion());
+        }
+      }
+      return quats.length > 0 ? quats : null;
+    }
+
+    if ((oriProp as any).type !== 'array') return null;
     const quats: THREE.Quaternion[] = [];
-    for (const el of oriProp.value) {
+    for (const el of (oriProp as any).value) {
       if (!el || typeof el !== 'object' || el.type !== 'tuple' || el.value.length < 4) {
         quats.push(new THREE.Quaternion()); // identity fallback
         continue;
       }
-      // USD `quath` is authored as (real, i, j, k) == (w, x, y, z).
-      // Three.js expects (x, y, z, w).
-      //
-      // If we treat USD values as (x,y,z,w), identity (1,0,0,0) becomes a 180° flip (w=0),
-      // which is exactly what happens in OpenChessSet pawn instancing.
+      // USD `quat*` is authored as (w, x, y, z). Three.js expects (x, y, z, w).
       const [w, x, y, z] = el.value;
-      // USD quath identity is commonly (1,0,0,0). Some sources also serialize (0,0,0,0); treat that as identity too.
       if (typeof x === 'number' && typeof y === 'number' && typeof z === 'number' && typeof w === 'number') {
         const q = new THREE.Quaternion(x, y, z, w);
-        // If all components are 0, treat as identity.
         if (q.x === 0 && q.y === 0 && q.z === 0 && q.w === 0) q.set(0, 0, 0, 1);
         quats.push(q);
       } else {

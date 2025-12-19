@@ -19,7 +19,27 @@ import { getPrimProp, getPrimPropAtTime, propHasAnimation, sdfToNumberTuple } fr
  * - three.js Matrix4 conventions: `https://threejs.org/manual/en/matrix-transformations.html`
  */
 export function parseMatrix4dArray(v: SdfValue | undefined): THREE.Matrix4[] | null {
-    if (!v || typeof v !== 'object' || v.type !== 'array') return null;
+    if (!v || typeof v !== 'object') return null;
+    // Fast path: packed typed array (flat row-major 16*N)
+    if ((v as any).type === 'typedArray' && ((v as any).elementType === 'matrix4d' || (v as any).elementType === 'matrix4f' || (v as any).elementType === 'matrix4h')) {
+        const data: any = (v as any).value;
+        if (!(data instanceof Float64Array) && !(data instanceof Float32Array)) return null;
+        if (data.length < 16 || data.length % 16 !== 0) return null;
+        const matrices: THREE.Matrix4[] = [];
+        for (let off = 0; off < data.length; off += 16) {
+            // USD is row-major row-vector. Convert to Three.js by transposing.
+            const m = new THREE.Matrix4();
+            m.set(
+                data[off + 0]!, data[off + 4]!, data[off + 8]!, data[off + 12]!,
+                data[off + 1]!, data[off + 5]!, data[off + 9]!, data[off + 13]!,
+                data[off + 2]!, data[off + 6]!, data[off + 10]!, data[off + 14]!,
+                data[off + 3]!, data[off + 7]!, data[off + 11]!, data[off + 15]!,
+            );
+            matrices.push(m);
+        }
+        return matrices.length ? matrices : null;
+    }
+    if (v.type !== 'array') return null;
     const matrices: THREE.Matrix4[] = [];
     for (const mat of v.value) {
         if (!mat || typeof mat !== 'object' || mat.type !== 'tuple' || mat.value.length !== 4) continue;
@@ -61,7 +81,22 @@ export function parseMatrix4dArray(v: SdfValue | undefined): THREE.Matrix4[] | n
  * - three.js Matrix4 conventions: `https://threejs.org/manual/en/matrix-transformations.html`
  */
 export function parseMatrix4d(v: SdfValue | undefined): THREE.Matrix4 | null {
-    if (!v || typeof v !== 'object' || v.type !== 'tuple' || v.value.length !== 4) return null;
+    if (!v || typeof v !== 'object') return null;
+    // Fast path: packed typed array (flat row-major 16)
+    if ((v as any).type === 'typedArray' && ((v as any).elementType === 'matrix4d' || (v as any).elementType === 'matrix4f' || (v as any).elementType === 'matrix4h')) {
+        const data: any = (v as any).value;
+        if (!(data instanceof Float64Array) && !(data instanceof Float32Array)) return null;
+        if (data.length !== 16) return null;
+        const m = new THREE.Matrix4();
+        m.set(
+            data[0]!, data[4]!, data[8]!, data[12]!,
+            data[1]!, data[5]!, data[9]!, data[13]!,
+            data[2]!, data[6]!, data[10]!, data[14]!,
+            data[3]!, data[7]!, data[11]!, data[15]!,
+        );
+        return m;
+    }
+    if (v.type !== 'tuple' || v.value.length !== 4) return null;
 
     // Each v.value element is a row (tuple of 4 numbers)
     const rows: number[][] = [];
@@ -135,7 +170,7 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
     const matrixForOp = (opName: string): THREE.Matrix4 | null => {
         // Matrix op
         if (opName.startsWith('xformOp:transform')) {
-        const m = parseMatrix4d(getVal(opName));
+            const m = parseMatrix4d(getVal(opName));
             if (!m) return null;
             if (unitScale !== 1.0) {
                 m.elements[12]! *= unitScale;

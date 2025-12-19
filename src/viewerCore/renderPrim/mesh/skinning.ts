@@ -256,20 +256,35 @@ export function renderUsdSkinnedMesh(opts: {
                 // Parse SkelAnimation rotations
                 const rotationsProp = animPrim.properties?.get('rotations');
                 const rotationsVal = rotationsProp?.defaultValue;
-                if (rotationsVal && typeof rotationsVal === 'object' && (rotationsVal as any).type === 'array') {
-                    const rotations = (rotationsVal as any).value;
-                    if (USDDEBUG) dbg(`[Mesh] ${node.path}: Found SkelAnimation with ${rotations.length} rotations`);
+                if (rotationsVal && typeof rotationsVal === 'object') {
+                    // Fast path: packed typed array (flat wxyz...)
+                    if ((rotationsVal as any).type === 'typedArray' && ((rotationsVal as any).elementType === 'quatf' || (rotationsVal as any).elementType === 'quatd' || (rotationsVal as any).elementType === 'quath')) {
+                        const data: any = (rotationsVal as any).value;
+                        if ((data instanceof Float32Array) || (data instanceof Float64Array)) {
+                            const count = Math.floor(data.length / 4);
+                            if (USDDEBUG) dbg(`[Mesh] ${node.path}: Found SkelAnimation with ${count} rotations (packed)`);
+                            for (let i = 0; i < count && i < skeleton.bones.length; i++) {
+                                const w = data[i * 4 + 0]!, x = data[i * 4 + 1]!, y = data[i * 4 + 2]!, z = data[i * 4 + 3]!;
+                                if (Number.isFinite(w) && Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
+                                    skeleton.bones[i]!.quaternion.set(x, y, z, w);
+                                    skeleton.bones[i]!.updateMatrix();
+                                }
+                            }
+                        }
+                    } else if ((rotationsVal as any).type === 'array') {
+                        const rotations = (rotationsVal as any).value;
+                        if (USDDEBUG) dbg(`[Mesh] ${node.path}: Found SkelAnimation with ${rotations.length} rotations`);
 
-                    // Apply rotations to bones
-                    for (let i = 0; i < rotations.length && i < skeleton.bones.length; i++) {
-                        const rot = rotations[i];
-                        if (rot && rot.type === 'tuple' && rot.value.length >= 4) {
-                            // USD quaternions are stored as (w, x, y, z), Three.js expects (x, y, z, w)
-                            const [w, x, y, z] = rot.value;
-                            skeleton.bones[i]!.quaternion.set(x, y, z, w);
-                            // Update bone's local matrix after changing quaternion
-                            skeleton.bones[i]!.updateMatrix();
-                            if (USDDEBUG) dbg(`[Mesh] Bone ${skeleton.bones[i]!.name} rotation: (${x}, ${y}, ${z}, ${w})`);
+                        // Apply rotations to bones
+                        for (let i = 0; i < rotations.length && i < skeleton.bones.length; i++) {
+                            const rot = rotations[i];
+                            if (rot && rot.type === 'tuple' && rot.value.length >= 4) {
+                                // USD quaternions are stored as (w, x, y, z), Three.js expects (x, y, z, w)
+                                const [w, x, y, z] = rot.value;
+                                skeleton.bones[i]!.quaternion.set(x, y, z, w);
+                                skeleton.bones[i]!.updateMatrix();
+                                if (USDDEBUG) dbg(`[Mesh] Bone ${skeleton.bones[i]!.name} rotation: (${x}, ${y}, ${z}, ${w})`);
+                            }
                         }
                     }
 
