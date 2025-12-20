@@ -192,8 +192,11 @@ export function extractStandardSurfaceInputs(
                                 const fileDv: any = fileProp?.defaultValue;
                                 if (USDDEBUG) dbg(`[resolveConnectedTextureFile] fileDv:`, fileDv);
                                 if (fileDv && typeof fileDv === 'object' && fileDv.type === 'asset' && typeof fileDv.value === 'string') {
+                                    const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
                                     const fromId = typeof (fileDv as any).__fromIdentifier === 'string' ? (fileDv as any).__fromIdentifier : null;
-                                    const resolved = fromId ? resolveAssetPath(fileDv.value, fromId) : fileDv.value;
+                                    const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+                                    const normVal = stripCorpusPrefix(fileDv.value);
+                                    const resolved = normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
                                     if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file: ${resolved}`);
                                     return resolved;
                                 }
@@ -216,8 +219,11 @@ export function extractStandardSurfaceInputs(
                                             const realFileDv: any = realFileProp?.defaultValue;
                                             if (USDDEBUG) dbg(`[resolveConnectedTextureFile] real image file:`, realFileDv);
                                             if (realFileDv && typeof realFileDv === 'object' && realFileDv.type === 'asset' && typeof realFileDv.value === 'string') {
+                                                const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
                                                 const fromId = typeof (realFileDv as any).__fromIdentifier === 'string' ? (realFileDv as any).__fromIdentifier : null;
-                                                const resolved = fromId ? resolveAssetPath(realFileDv.value, fromId) : realFileDv.value;
+                                                const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+                                                const normVal = stripCorpusPrefix(realFileDv.value);
+                                                const resolved = normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
                                                 if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file via intermediate node: ${resolved}`);
                                                 return resolved;
                                             }

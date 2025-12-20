@@ -5,15 +5,20 @@ export function createResolveAssetUrl(opts: {
 }): (assetPath: string, fromIdentifier?: string) => string | null {
   return (assetPath: string, fromIdentifier?: string): string | null => {
     try {
+      const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
+      // Some upstream callers may accidentally pass corpus-keyed identifiers/paths (`[corpus]...`).
+      // Normalize early so we don't accidentally join `[corpus]packages/usdjs/...` into a directory path.
+      const normalizedAssetPath = stripCorpusPrefix(assetPath);
+
       // If it's an external URL (http:// or https://), use the proxy endpoint
-      if (assetPath.match(/^https?:\/\//)) {
-        return `/__usdjs_proxy?url=${encodeURIComponent(assetPath)}`;
+      if (normalizedAssetPath.match(/^https?:\/\//)) {
+        return `/__usdjs_proxy?url=${encodeURIComponent(normalizedAssetPath)}`;
       }
       // If the assetPath is already an absolute-ish corpus path, don't re-resolve it.
       // This is important for MaterialX-derived textures where we may normalize filenames
       // to `packages/usdjs/.../tex/foo.jpg`.
-      if (assetPath.startsWith('packages/usdjs/')) {
-        const rel = assetPath.slice('packages/usdjs/'.length);
+      if (normalizedAssetPath.startsWith('packages/usdjs/')) {
+        const rel = normalizedAssetPath.slice('packages/usdjs/'.length);
         return `/__usdjs_corpus?file=${encodeURIComponent(rel)}`;
       }
       // Use the provided identifier, or fall back to currentIdentifier.
@@ -43,7 +48,7 @@ export function createResolveAssetUrl(opts: {
         return (isAbs ? '/' : '') + out.join('/');
       };
 
-      const resolved = normalizePosixPath(resolveAssetPath(assetPath, identifier as any));
+      const resolved = normalizePosixPath(resolveAssetPath(normalizedAssetPath, identifier as any));
 
       // If the resolved path is an external URL (e.g., when resolving relative to an external USD file),
       // use the proxy endpoint instead of corpus endpoint

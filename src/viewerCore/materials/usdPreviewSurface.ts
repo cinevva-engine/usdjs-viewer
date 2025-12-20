@@ -242,19 +242,19 @@ export function createUsdPreviewSurfaceMaterial(opts: {
                 } else {
                   mat.alphaMap = tex;
                 }
-              // If threshold wasn't authored but an opacity map exists, default to a gentle cutout.
-              if (mat.alphaTest === 0) mat.alphaTest = 0.5;
-              mat.transparent = false;
-              mat.depthWrite = true;
-              mat.needsUpdate = true;
+                // If threshold wasn't authored but an opacity map exists, default to a gentle cutout.
+                if (mat.alphaTest === 0) mat.alphaTest = 0.5;
+                mat.transparent = false;
+                mat.depthWrite = true;
+                mat.needsUpdate = true;
 
-              if (info.biasRgb && (info.biasRgb.r !== 0 || info.biasRgb.g !== 0 || info.biasRgb.b !== 0)) {
-                warnOnce(
-                  `bias:opacity`,
-                  'UsdUVTexture inputs:bias is not supported for opacity; ignoring bias=',
-                  info.biasRgb,
-                );
-              }
+                if (info.biasRgb && (info.biasRgb.r !== 0 || info.biasRgb.g !== 0 || info.biasRgb.b !== 0)) {
+                  warnOnce(
+                    `bias:opacity`,
+                    'UsdUVTexture inputs:bias is not supported for opacity; ignoring bias=',
+                    info.biasRgb,
+                  );
+                }
               });
             },
             (err: unknown) => {
@@ -332,10 +332,10 @@ export function createUsdPreviewSurfaceMaterial(opts: {
               deferTextureApply(() => {
                 mat.emissiveMap = tex;
 
-              // Ensure the emissive map actually contributes if no constant emissiveColor was authored.
-              if (!inputs.emissiveColor) mat.emissive.setHex(0xffffff);
-              mat.emissiveIntensity = Math.max(mat.emissiveIntensity, 1.0);
-              mat.needsUpdate = true;
+                // Ensure the emissive map actually contributes if no constant emissiveColor was authored.
+                if (!inputs.emissiveColor) mat.emissive.setHex(0xffffff);
+                mat.emissiveIntensity = Math.max(mat.emissiveIntensity, 1.0);
+                mat.needsUpdate = true;
               });
             },
             (err: unknown) => {

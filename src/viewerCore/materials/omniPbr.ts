@@ -26,19 +26,24 @@ export function extractOmniPbrInputs(shader: SdfPrimSpec): {
     const result: any = {};
 
     const getAssetPath = (name: string): string | undefined => {
+        const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
         const prop = shader.properties?.get(name);
         const dv: any = prop?.defaultValue;
         // Some layers serialize asset paths as plain strings; support both.
-        if (typeof dv === 'string') return dv;
+        if (typeof dv === 'string') return stripCorpusPrefix(dv);
         if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') {
             const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
-            return fromId ? resolveAssetPath(dv.value, fromId) : dv.value;
+            const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+            const normVal = stripCorpusPrefix(dv.value);
+            return normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
         }
         // usdjs may parse `@path@`-style authored values as a 'reference' SdfValue (with extra metadata fields).
         // OmniPBR MDL inputs frequently use this encoding.
         if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') {
             const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
-            return fromId ? resolveAssetPath(dv.assetPath, fromId) : dv.assetPath;
+            const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+            const normVal = stripCorpusPrefix(dv.assetPath);
+            return normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
         }
         return undefined;
     };

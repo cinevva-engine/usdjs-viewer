@@ -240,9 +240,12 @@ export function renderUsdLightPrim(opts: {
       const texAsset =
         texVal && typeof texVal === 'object' && (texVal as any).type === 'asset' && typeof (texVal as any).value === 'string'
           ? (() => {
+            const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
             const raw = (texVal as any).value as string;
             const fromId = typeof (texVal as any).__fromIdentifier === 'string' ? ((texVal as any).__fromIdentifier as string) : null;
-            return fromId ? resolveAssetPath(raw, fromId) : raw;
+            const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+            const normRaw = stripCorpusPrefix(raw);
+            return normFromId ? resolveAssetPath(normRaw, normFromId) : normRaw;
           })()
           : null;
       const fmtVal = getPrimProp(prim, 'inputs:texture:format') ?? getPrimProp(prim, 'texture:format');

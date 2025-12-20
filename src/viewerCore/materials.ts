@@ -339,7 +339,10 @@ export function resolveUsdUvTextureInfo(
         : null;
   const filePath =
     filePathRaw && fileDv && typeof fileDv === 'object' && typeof (fileDv as any).__fromIdentifier === 'string'
-      ? resolveAssetPath(filePathRaw, (fileDv as any).__fromIdentifier)
+      ? (() => {
+        const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
+        return resolveAssetPath(stripCorpusPrefix(filePathRaw), stripCorpusPrefix((fileDv as any).__fromIdentifier));
+      })()
       : filePathRaw;
   if (!filePath) return null;
 
