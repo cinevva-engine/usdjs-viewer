@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { SdfPrimSpec } from '@cinevva/usdjs';
+import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { findPrimByPath } from './usdPaths';
 import {
@@ -331,12 +331,16 @@ export function resolveUsdUvTextureInfo(
 
   const fileDv: any = texShader.properties?.get('inputs:file')?.defaultValue;
   // Some layers may serialize asset paths as plain strings; support both.
-  const filePath =
+  const filePathRaw =
     typeof fileDv === 'string'
       ? fileDv
       : fileDv && typeof fileDv === 'object' && fileDv.type === 'asset' && typeof fileDv.value === 'string'
         ? fileDv.value
         : null;
+  const filePath =
+    filePathRaw && fileDv && typeof fileDv === 'object' && typeof (fileDv as any).__fromIdentifier === 'string'
+      ? resolveAssetPath(filePathRaw, (fileDv as any).__fromIdentifier)
+      : filePathRaw;
   if (!filePath) return null;
 
   const wrapS = texShader.properties?.get('inputs:wrapS')?.defaultValue;

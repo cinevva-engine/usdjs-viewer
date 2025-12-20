@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { SdfPrimSpec } from '@cinevva/usdjs';
+import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { getPrimProp } from '../usdAnim';
 
@@ -237,9 +237,14 @@ export function renderUsdLightPrim(opts: {
       // DomeLight is environment lighting. If a latlong texture is provided, load it and set scene.environment.
       // Otherwise, fall back to a simple hemispherical ambient approximation.
       const texVal = getPrimProp(prim, 'inputs:texture:file') ?? getPrimProp(prim, 'texture:file');
-      const texAsset = (texVal && typeof texVal === 'object' && (texVal as any).type === 'asset')
-        ? ((texVal as any).value as string)
-        : null;
+      const texAsset =
+        texVal && typeof texVal === 'object' && (texVal as any).type === 'asset' && typeof (texVal as any).value === 'string'
+          ? (() => {
+            const raw = (texVal as any).value as string;
+            const fromId = typeof (texVal as any).__fromIdentifier === 'string' ? ((texVal as any).__fromIdentifier as string) : null;
+            return fromId ? resolveAssetPath(raw, fromId) : raw;
+          })()
+          : null;
       const fmtVal = getPrimProp(prim, 'inputs:texture:format') ?? getPrimProp(prim, 'texture:format');
       const fmt =
         typeof fmtVal === 'string'

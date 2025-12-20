@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { SdfPrimSpec } from '@cinevva/usdjs';
 
 import { applyUsdTransform2dToTexture, applyWrapMode } from '../textureUtils';
+import { deferTextureApply, getOrLoadTextureClone } from '../../textureCache';
 
 // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
 // IMPORTANT: normal map resolution runs during scene load and can spam / slow traces.
@@ -135,28 +136,28 @@ uniform vec3 usdNormalBias;`
           if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Using standard Three.js normal map handling');
         }
 
-        new THREE.TextureLoader().load(
-          url,
-          (tex: any) => {
+        void getOrLoadTextureClone(url, (tex) => {
+          tex.colorSpace = THREE.NoColorSpace;
+          applyWrapMode(tex, info.wrapS, info.wrapT);
+          if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
+        }).then(
+          (tex) => {
             if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Normal texture loaded successfully:', info.file);
-            tex.colorSpace = THREE.NoColorSpace;
-            applyWrapMode(tex, info.wrapS, info.wrapT);
-            if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
-            mat.normalMap = tex;
-
-            // For standard Three.js convention, we don't need custom shader
-            // normalScale is left at default (1,1)
-            mat.needsUpdate = true;
-            if (USDDEBUG) {
-              dbg('[NormalBiasScale DEBUG] Material after normal map:', {
-                color: mat.color.getHexString(),
-                normalMap: !!mat.normalMap,
-                roughness: mat.roughness,
-                metalness: mat.metalness,
-              });
-            }
+            deferTextureApply(() => {
+              mat.normalMap = tex;
+              // For standard Three.js convention, we don't need custom shader
+              // normalScale is left at default (1,1)
+              mat.needsUpdate = true;
+              if (USDDEBUG) {
+                dbg('[NormalBiasScale DEBUG] Material after normal map:', {
+                  color: mat.color.getHexString(),
+                  normalMap: !!mat.normalMap,
+                  roughness: mat.roughness,
+                  metalness: mat.metalness,
+                });
+              }
+            });
           },
-          undefined,
           (err: unknown) => {
             dbgError('Failed to load UsdPreviewSurface normal texture:', info.file, url, err);
           },

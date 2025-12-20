@@ -4,6 +4,9 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 import { alphaToGreenAlphaMap, applyUsdTransform2dToTexture, applyWrapMode } from './textureUtils';
 import { guessSolidColorFromAssetPath } from './usdPreviewSurface/guessSolidColor';
 import { applyUsdPreviewSurfaceNormalMap } from './usdPreviewSurface/normalMap';
+import { deferTextureApply, getOrLoadTextureClone } from '../textureCache';
+
+const isExr = (url: string) => /\.exr(\?|#|$)/i.test(url);
 
 // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
 // IMPORTANT: material builder can run many times during scene load; keep debug opt-in.
@@ -149,35 +152,38 @@ export function createUsdPreviewSurfaceMaterial(opts: {
       if (info) {
         const url = resolveAssetUrl(info.file);
         if (url) {
-          new THREE.TextureLoader().load(
-            url,
-            (tex: any) => {
-              const cs = (info.sourceColorSpace ?? '').toLowerCase();
-              // Many USDs omit `inputs:sourceColorSpace` for baseColor/diffuse textures; default those to sRGB.
-              tex.colorSpace = (cs === 'srgb' || cs === '') ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-              applyWrapMode(tex, info.wrapS, info.wrapT);
-              if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
-              mat.map = tex;
+          void getOrLoadTextureClone(url, (tex) => {
+            const cs = (info.sourceColorSpace ?? '').toLowerCase();
+            // EXR is linear. Many corpora store ACEScg EXRs; Three cannot fully represent ACEScg primaries,
+            // but treating as linear is still better than forcing sRGB transfer.
+            if (isExr(url)) tex.colorSpace = THREE.LinearSRGBColorSpace;
+            else tex.colorSpace = (cs === 'srgb' || cs === '') ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+            applyWrapMode(tex, info.wrapS, info.wrapT);
+            if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
+          }).then(
+            (tex) => {
+              deferTextureApply(() => {
+                mat.map = tex;
 
-              // Treat authored constant diffuseColor as a multiply tint (matches OmniPBR samples),
-              // and also fold in UsdUVTexture's `inputs:scale` when present.
-              // Note: we can't represent UsdUVTexture bias with MeshPhysicalMaterial, so we ignore it
-              // unless it's effectively zero.
-              const tint = inputs.diffuseColor ? inputs.diffuseColor.clone() : new THREE.Color(1, 1, 1);
-              if (info.scaleRgb) tint.multiply(info.scaleRgb);
-              mat.color.copy(tint);
+                // Treat authored constant diffuseColor as a multiply tint (matches OmniPBR samples),
+                // and also fold in UsdUVTexture's `inputs:scale` when present.
+                // Note: we can't represent UsdUVTexture bias with MeshPhysicalMaterial, so we ignore it
+                // unless it's effectively zero.
+                const tint = inputs.diffuseColor ? inputs.diffuseColor.clone() : new THREE.Color(1, 1, 1);
+                if (info.scaleRgb) tint.multiply(info.scaleRgb);
+                mat.color.copy(tint);
 
-              if (info.biasRgb && (info.biasRgb.r !== 0 || info.biasRgb.g !== 0 || info.biasRgb.b !== 0)) {
-                warnOnce(
-                  `bias:baseColor`,
-                  'UsdUVTexture inputs:bias is not supported for MeshPhysicalMaterial baseColor; ignoring bias=',
-                  info.biasRgb,
-                );
-              }
+                if (info.biasRgb && (info.biasRgb.r !== 0 || info.biasRgb.g !== 0 || info.biasRgb.b !== 0)) {
+                  warnOnce(
+                    `bias:baseColor`,
+                    'UsdUVTexture inputs:bias is not supported for MeshPhysicalMaterial baseColor; ignoring bias=',
+                    info.biasRgb,
+                  );
+                }
 
-              mat.needsUpdate = true;
+                mat.needsUpdate = true;
+              });
             },
-            undefined,
             (err: unknown) => {
               if (USDDEBUG) {
                 // eslint-disable-next-line no-console
@@ -220,21 +226,22 @@ export function createUsdPreviewSurfaceMaterial(opts: {
       if (info) {
         const url = resolveAssetUrl(info.file);
         if (url) {
-          new THREE.TextureLoader().load(
-            url,
-            (tex: any) => {
-              // Opacity is data; do not color-manage.
-              tex.colorSpace = THREE.NoColorSpace;
-              applyWrapMode(tex, info.wrapS, info.wrapT);
-              if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
-              // Three's alphaMap uses the GREEN channel. If USD connected `outputs:a` (alpha),
-              // prefer the actual alpha channel by converting it into green.
-              if (oConn.outputName === 'outputs:a') {
-                const converted = alphaToGreenAlphaMap(tex);
-                mat.alphaMap = converted ?? tex;
-              } else {
-                mat.alphaMap = tex;
-              }
+          void getOrLoadTextureClone(url, (tex) => {
+            // Opacity is data; do not color-manage.
+            tex.colorSpace = THREE.NoColorSpace;
+            applyWrapMode(tex, info.wrapS, info.wrapT);
+            if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
+          }).then(
+            (tex) => {
+              deferTextureApply(() => {
+                // Three's alphaMap uses the GREEN channel. If USD connected `outputs:a` (alpha),
+                // prefer the actual alpha channel by converting it into green.
+                if (oConn.outputName === 'outputs:a') {
+                  const converted = alphaToGreenAlphaMap(tex);
+                  mat.alphaMap = converted ?? tex;
+                } else {
+                  mat.alphaMap = tex;
+                }
               // If threshold wasn't authored but an opacity map exists, default to a gentle cutout.
               if (mat.alphaTest === 0) mat.alphaTest = 0.5;
               mat.transparent = false;
@@ -248,8 +255,8 @@ export function createUsdPreviewSurfaceMaterial(opts: {
                   info.biasRgb,
                 );
               }
+              });
             },
-            undefined,
             (err: unknown) => {
               if (USDDEBUG) {
                 // eslint-disable-next-line no-console
@@ -267,16 +274,17 @@ export function createUsdPreviewSurfaceMaterial(opts: {
       if (info) {
         const url = resolveAssetUrl(info.file);
         if (url) {
-          new THREE.TextureLoader().load(
-            url,
-            (tex: any) => {
-              tex.colorSpace = THREE.NoColorSpace;
-              applyWrapMode(tex, info.wrapS, info.wrapT);
-              if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
-              mat.clearcoatMap = tex;
-              mat.needsUpdate = true;
+          void getOrLoadTextureClone(url, (tex) => {
+            tex.colorSpace = THREE.NoColorSpace;
+            applyWrapMode(tex, info.wrapS, info.wrapT);
+            if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
+          }).then(
+            (tex) => {
+              deferTextureApply(() => {
+                mat.clearcoatMap = tex;
+                mat.needsUpdate = true;
+              });
             },
-            undefined,
             (err: unknown) => {
               if (USDDEBUG) {
                 // eslint-disable-next-line no-console
@@ -313,21 +321,23 @@ export function createUsdPreviewSurfaceMaterial(opts: {
       if (info) {
         const url = resolveAssetUrl(info.file);
         if (url) {
-          new THREE.TextureLoader().load(
-            url,
-            (tex: any) => {
-              const cs = (info.sourceColorSpace ?? '').toLowerCase();
-              tex.colorSpace = (cs === 'srgb' || cs === '') ? THREE.SRGBColorSpace : THREE.NoColorSpace;
-              applyWrapMode(tex, info.wrapS, info.wrapT);
-              if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
-              mat.emissiveMap = tex;
+          void getOrLoadTextureClone(url, (tex) => {
+            const cs = (info.sourceColorSpace ?? '').toLowerCase();
+            if (isExr(url)) tex.colorSpace = THREE.LinearSRGBColorSpace;
+            else tex.colorSpace = (cs === 'srgb' || cs === '') ? THREE.SRGBColorSpace : THREE.NoColorSpace;
+            applyWrapMode(tex, info.wrapS, info.wrapT);
+            if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
+          }).then(
+            (tex) => {
+              deferTextureApply(() => {
+                mat.emissiveMap = tex;
 
               // Ensure the emissive map actually contributes if no constant emissiveColor was authored.
               if (!inputs.emissiveColor) mat.emissive.setHex(0xffffff);
               mat.emissiveIntensity = Math.max(mat.emissiveIntensity, 1.0);
               mat.needsUpdate = true;
+              });
             },
-            undefined,
             (err: unknown) => {
               if (USDDEBUG) {
                 // eslint-disable-next-line no-console

@@ -1,7 +1,10 @@
 import * as THREE from 'three';
-import type { SdfPrimSpec } from '@cinevva/usdjs';
+import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { findPrimByPath } from '../usdPaths';
+import { deferTextureApply, getOrLoadTextureClone } from '../textureCache';
+
+const isExr = (url: string) => /\.exr(\?|#|$)/i.test(url);
 
 // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
 // IMPORTANT: StandardSurface resolution can run per-material and spam the console / slow loads.
@@ -189,8 +192,10 @@ export function extractStandardSurfaceInputs(
                                 const fileDv: any = fileProp?.defaultValue;
                                 if (USDDEBUG) dbg(`[resolveConnectedTextureFile] fileDv:`, fileDv);
                                 if (fileDv && typeof fileDv === 'object' && fileDv.type === 'asset' && typeof fileDv.value === 'string') {
-                                    if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file: ${fileDv.value}`);
-                                    return fileDv.value;
+                                    const fromId = typeof (fileDv as any).__fromIdentifier === 'string' ? (fileDv as any).__fromIdentifier : null;
+                                    const resolved = fromId ? resolveAssetPath(fileDv.value, fromId) : fileDv.value;
+                                    if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file: ${resolved}`);
+                                    return resolved;
                                 }
 
                                 // For normal maps, the nodegraph output may connect to a normalmap node,
@@ -211,8 +216,10 @@ export function extractStandardSurfaceInputs(
                                             const realFileDv: any = realFileProp?.defaultValue;
                                             if (USDDEBUG) dbg(`[resolveConnectedTextureFile] real image file:`, realFileDv);
                                             if (realFileDv && typeof realFileDv === 'object' && realFileDv.type === 'asset' && typeof realFileDv.value === 'string') {
-                                                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file via intermediate node: ${realFileDv.value}`);
-                                                return realFileDv.value;
+                                                const fromId = typeof (realFileDv as any).__fromIdentifier === 'string' ? (realFileDv as any).__fromIdentifier : null;
+                                                const resolved = fromId ? resolveAssetPath(realFileDv.value, fromId) : realFileDv.value;
+                                                if (USDDEBUG) dbg(`[resolveConnectedTextureFile] FOUND texture file via intermediate node: ${resolved}`);
+                                                return resolved;
                                             }
                                         }
                                     }
@@ -352,15 +359,16 @@ export function createStandardSurfaceMaterial(opts: {
         const url = resolveAssetUrl(inputs.diffuseTextureFile);
         if (USDDEBUG) dbgWarn('[StandardSurface] resolved diffuse URL:', url);
         if (url) {
-            new THREE.TextureLoader().load(
-                url,
-                (tex: any) => {
+            void getOrLoadTextureClone(url, (tex) => {
+                tex.colorSpace = isExr(url) ? THREE.LinearSRGBColorSpace : THREE.SRGBColorSpace;
+            }).then(
+                (tex) => {
                     if (USDDEBUG) dbgWarn('[StandardSurface] Diffuse texture LOADED successfully:', inputs.diffuseTextureFile);
-                    tex.colorSpace = THREE.SRGBColorSpace;
-                    mat.map = tex;
-                    mat.needsUpdate = true;
+                    deferTextureApply(() => {
+                        mat.map = tex;
+                        mat.needsUpdate = true;
+                    });
                 },
-                undefined,
                 (err: unknown) => {
                     if (USDDEBUG) dbgError('Failed to load Standard Surface diffuse texture:', inputs.diffuseTextureFile, url, err);
                 },
@@ -372,14 +380,15 @@ export function createStandardSurfaceMaterial(opts: {
     if (inputs.roughnessTextureFile && resolveAssetUrl) {
         const url = resolveAssetUrl(inputs.roughnessTextureFile);
         if (url) {
-            new THREE.TextureLoader().load(
-                url,
-                (tex: any) => {
-                    tex.colorSpace = THREE.NoColorSpace;
-                    mat.roughnessMap = tex;
-                    mat.needsUpdate = true;
+            void getOrLoadTextureClone(url, (tex) => {
+                tex.colorSpace = THREE.NoColorSpace;
+            }).then(
+                (tex) => {
+                    deferTextureApply(() => {
+                        mat.roughnessMap = tex;
+                        mat.needsUpdate = true;
+                    });
                 },
-                undefined,
                 (err: unknown) => {
                     if (USDDEBUG) dbgError('Failed to load Standard Surface roughness texture:', inputs.roughnessTextureFile, url, err);
                 },
@@ -391,15 +400,16 @@ export function createStandardSurfaceMaterial(opts: {
     if (inputs.normalTextureFile && resolveAssetUrl) {
         const url = resolveAssetUrl(inputs.normalTextureFile);
         if (url) {
-            new THREE.TextureLoader().load(
-                url,
-                (tex: any) => {
-                    tex.colorSpace = THREE.NoColorSpace;
-                    mat.normalMap = tex;
-                    mat.needsUpdate = true;
-                    if (USDDEBUG) dbg('[StandardSurface] Normal texture loaded successfully:', inputs.normalTextureFile);
+            void getOrLoadTextureClone(url, (tex) => {
+                tex.colorSpace = THREE.NoColorSpace;
+            }).then(
+                (tex) => {
+                    deferTextureApply(() => {
+                        mat.normalMap = tex;
+                        mat.needsUpdate = true;
+                        if (USDDEBUG) dbg('[StandardSurface] Normal texture loaded successfully:', inputs.normalTextureFile);
+                    });
                 },
-                undefined,
                 (err: unknown) => {
                     if (USDDEBUG) dbgError('Failed to load Standard Surface normal texture:', inputs.normalTextureFile, url, err);
                 },

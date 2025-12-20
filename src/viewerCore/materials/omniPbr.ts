@@ -1,7 +1,10 @@
 import * as THREE from 'three';
-import type { SdfPrimSpec } from '@cinevva/usdjs';
+import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { alphaToGreenAlphaMap } from './textureUtils';
+import { deferTextureApply, getOrLoadTextureClone } from '../textureCache';
+
+const isExr = (url: string) => /\.exr(\?|#|$)/i.test(url);
 
 export function extractOmniPbrInputs(shader: SdfPrimSpec): {
     diffuseColor?: THREE.Color;
@@ -27,10 +30,16 @@ export function extractOmniPbrInputs(shader: SdfPrimSpec): {
         const dv: any = prop?.defaultValue;
         // Some layers serialize asset paths as plain strings; support both.
         if (typeof dv === 'string') return dv;
-        if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') return dv.value;
+        if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') {
+            const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
+            return fromId ? resolveAssetPath(dv.value, fromId) : dv.value;
+        }
         // usdjs may parse `@path@`-style authored values as a 'reference' SdfValue (with extra metadata fields).
         // OmniPBR MDL inputs frequently use this encoding.
-        if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') return dv.assetPath;
+        if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') {
+            const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
+            return fromId ? resolveAssetPath(dv.assetPath, fromId) : dv.assetPath;
+        }
         return undefined;
     };
 
@@ -120,14 +129,15 @@ export function createOmniPbrMaterial(opts: {
             // ignore
         }
         if (url) {
-            new THREE.TextureLoader().load(
-                url,
-                (tex: any) => {
-                    tex.colorSpace = THREE.SRGBColorSpace;
-                    mat.map = tex;
-                    mat.needsUpdate = true;
+            void getOrLoadTextureClone(url, (tex) => {
+                tex.colorSpace = isExr(url) ? THREE.LinearSRGBColorSpace : THREE.SRGBColorSpace;
+            }).then(
+                (tex) => {
+                    deferTextureApply(() => {
+                        mat.map = tex;
+                        mat.needsUpdate = true;
+                    });
                 },
-                undefined,
                 (err: unknown) => {
                     console.error('Failed to load OmniPBR diffuse texture:', inputs.diffuseTexture, url, err);
                 },
@@ -160,14 +170,15 @@ export function createOmniPbrMaterial(opts: {
                 // ignore
             }
             if (url) {
-                new THREE.TextureLoader().load(
-                    url,
-                    (tex: any) => {
-                        tex.colorSpace = THREE.SRGBColorSpace;
-                        mat.emissiveMap = tex;
-                        mat.needsUpdate = true;
+                void getOrLoadTextureClone(url, (tex) => {
+                    tex.colorSpace = isExr(url) ? THREE.LinearSRGBColorSpace : THREE.SRGBColorSpace;
+                }).then(
+                    (tex) => {
+                        deferTextureApply(() => {
+                            mat.emissiveMap = tex;
+                            mat.needsUpdate = true;
+                        });
                     },
-                    undefined,
                     (err: unknown) => {
                         console.error('Failed to load OmniPBR emissive texture:', inputs.emissiveColorTexture, url, err);
                     },
@@ -199,19 +210,20 @@ export function createOmniPbrMaterial(opts: {
         if (thr > 0) {
             const url = resolveAssetUrl(inputs.opacityTexture);
             if (url) {
-                new THREE.TextureLoader().load(
-                    url,
-                    (tex: any) => {
-                        // Opacity map should be treated as data, not color-managed.
-                        tex.colorSpace = THREE.NoColorSpace;
-
-                        // Three's alphaMap samples GREEN; if this texture has a meaningful alpha channel
-                        // (common for cutout leaves), convert alpha->green for correct masking.
-                        mat.alphaMap = alphaToGreenAlphaMap(tex) ?? tex;
-                        mat.alphaTest = THREE.MathUtils.clamp(thr, 0, 1);
-                        mat.transparent = false; // cutout/discard, not blending
-                        mat.depthWrite = true;
-                        mat.needsUpdate = true;
+                void getOrLoadTextureClone(url, (tex) => {
+                    // Opacity map should be treated as data, not color-managed.
+                    tex.colorSpace = THREE.NoColorSpace;
+                }).then(
+                    (tex) => {
+                        deferTextureApply(() => {
+                            // Three's alphaMap samples GREEN; if this texture has a meaningful alpha channel
+                            // (common for cutout leaves), convert alpha->green for correct masking.
+                            mat.alphaMap = alphaToGreenAlphaMap(tex) ?? tex;
+                            mat.alphaTest = THREE.MathUtils.clamp(thr, 0, 1);
+                            mat.transparent = false; // cutout/discard, not blending
+                            mat.depthWrite = true;
+                            mat.needsUpdate = true;
+                        });
 
                         const mode = inputs.opacityMode ?? 0;
                         if (mode !== 0) {
@@ -219,7 +231,6 @@ export function createOmniPbrMaterial(opts: {
                             console.warn('OmniPBR opacity_mode not fully supported (expected alpha channel). opacity_mode=', mode);
                         }
                     },
-                    undefined,
                     (err: unknown) => {
                         console.error('Failed to load OmniPBR opacity texture:', inputs.opacityTexture, url, err);
                     },

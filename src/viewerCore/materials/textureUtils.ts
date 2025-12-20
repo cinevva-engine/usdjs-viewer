@@ -71,7 +71,33 @@ export function applyWrapMode(tex: THREE.Texture, wrapS?: string, wrapT?: string
 }
 
 export function cloneTexturePreserveParams(src: THREE.Texture): THREE.Texture {
-    const tex = new THREE.Texture(src.image);
+    // DataTexture (e.g. EXRLoader) needs a DataTexture clone path.
+    if ((src as any).isDataTexture && (src as any).image?.data) {
+        const img: any = (src as any).image;
+        const data = img.data as ArrayBufferView;
+        const w = img.width as number;
+        const h = img.height as number;
+        const dt = new THREE.DataTexture(data as any, w, h, (src as any).format, (src as any).type);
+        const tex = dt as unknown as THREE.Texture;
+        tex.colorSpace = src.colorSpace;
+        tex.wrapS = src.wrapS;
+        tex.wrapT = src.wrapT;
+        tex.repeat.copy(src.repeat);
+        tex.offset.copy(src.offset);
+        tex.rotation = src.rotation;
+        tex.center.copy(src.center);
+        tex.flipY = src.flipY;
+        (tex as any).generateMipmaps = (src as any).generateMipmaps;
+        (tex as any).minFilter = (src as any).minFilter;
+        (tex as any).magFilter = (src as any).magFilter;
+        (tex as any).anisotropy = (src as any).anisotropy;
+        (tex as any).premultiplyAlpha = (src as any).premultiplyAlpha;
+        (tex as any).unpackAlignment = (src as any).unpackAlignment;
+        tex.needsUpdate = true;
+        return tex;
+    }
+
+    const tex = new THREE.Texture((src as any).image);
     tex.colorSpace = src.colorSpace;
     tex.wrapS = src.wrapS;
     tex.wrapT = src.wrapT;
