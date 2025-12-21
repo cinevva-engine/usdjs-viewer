@@ -176,6 +176,7 @@ export function renderPrim(
     container,
     helpersParent,
     prim: node.prim,
+    rootPrim,
     unitScale,
     dynamicHelperUpdates,
     hasUsdLightsRef,

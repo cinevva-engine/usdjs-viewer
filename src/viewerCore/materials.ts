@@ -19,6 +19,7 @@ import { createStandardSurfaceMaterial } from './materials/standardSurface';
 export { createUsdPreviewSurfaceMaterial } from './materials/usdPreviewSurface';
 
 import { createUsdPreviewSurfaceMaterial } from './materials/usdPreviewSurface';
+import { createMdlSourceAssetMaterial } from './materials/mdlSourceAsset';
 
 // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
 // IMPORTANT: material binding/shader resolution is called per-prim and can dominate load time if noisy.
@@ -42,6 +43,7 @@ const dbg = (...args: any[]) => {
 };
 
 export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, prototypeRoot?: SdfPrimSpec): SdfPrimSpec | null {
+  console.log('[MATERIALS] resolveMaterialBinding called for prim:', prim.path?.primPath, 'type:', prim.typeName);
   // USD material binding commonly inherits down namespace: a parent prim can bind a material
   // that applies to all descendant meshes. So we must walk up ancestors to find the nearest binding.
   //
@@ -109,11 +111,58 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
   }
 
   if (!bindingPath) {
+    console.log('[MATERIALS] No material binding found in ancestors, checking Omniverse ground fallback');
+    // Omniverse-specific: some scene templates use custom `ground:material:path` metadata on the environment root
+    // instead of a proper `rel material:binding = </Material>`. This still represents a real intended USD material.
+    //
+    // Example: `clean_cloudy_sky_and_floor.usd` authors:
+    //   custom string ground:material:path = "/Environment/Looks/Brick_Pavers"
+    // and leaves `rel material:binding` on the `ground` mesh empty.
+    const primPath = prim.path?.primPath ?? '';
+    const primName = primPath.split('/').filter(Boolean).slice(-1)[0] ?? '';
+    console.log('[MATERIALS] Prim name:', primName);
+    if (primName === 'ground') {
+      let cur2: SdfPrimSpec | null = prim;
+      while (cur2) {
+        const dv: any = cur2.properties?.get('ground:material:path')?.defaultValue;
+        if (typeof dv === 'string' && dv.startsWith('/')) {
+          console.log('[MATERIALS] Found ground:material:path:', dv);
+          bindingPath = dv;
+          bindingKey = 'ground:material:path';
+          break;
+        }
+        const p = cur2.path?.primPath;
+        if (!p || p === '/') break;
+        const parts = p.split('/').filter(Boolean);
+        parts.pop();
+        const parentPath = parts.length ? '/' + parts.join('/') : '/';
+        cur2 = findPrimByPath(root, parentPath);
+      }
+      if (bindingPath) {
+        // continue below with bindingPath populated
+      } else if (USDDEBUG) {
+        dbg(`[resolveMaterialBinding] prim=${prim.path?.primPath} -> NO material binding found (including Omni ground fallback)`);
+        return null;
+      }
+    } else {
+      if (USDDEBUG) dbg(`[resolveMaterialBinding] prim=${prim.path?.primPath} -> NO material binding found (including ancestors)`);
+      return null;
+    }
+  }
+
+  if (!bindingPath) {
+    console.log('[MATERIALS] NO material binding found for prim:', prim.path?.primPath);
     if (USDDEBUG) dbg(`[resolveMaterialBinding] prim=${prim.path?.primPath} -> NO material binding found (including ancestors)`);
     return null;
   }
 
   const materialPath = bindingPath;
+  console.log('[MATERIALS] Found material binding:', {
+    prim: prim.path?.primPath,
+    bindingKey,
+    materialPath,
+    prototypeRoot: prototypeRoot?.path?.primPath,
+  });
   if (USDDEBUG) {
     dbg(
       `[resolveMaterialBinding] prim=${prim.path?.primPath}, bindingKey=${bindingKey}, materialPath=${materialPath}, prototypeRoot=${prototypeRoot?.path?.primPath}`,
@@ -125,8 +174,12 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
   // (for referenced files where paths like /root/Materials/tree_leaves should resolve relative to the reference root).
   if (materialPath.startsWith('/')) {
     const fromRoot = findPrimByPath(root, materialPath);
+    console.log('[MATERIALS] Resolving material from root:', materialPath, '->', fromRoot?.path?.primPath ?? 'null');
     if (USDDEBUG) dbg(`[resolveMaterialBinding]   fromRoot(${materialPath})=${fromRoot?.path?.primPath ?? 'null'}`);
-    if (fromRoot) return fromRoot;
+    if (fromRoot) {
+      console.log('[MATERIALS] Material found!', fromRoot.path?.primPath, 'type:', fromRoot.typeName);
+      return fromRoot;
+    }
 
     // For referenced prototypes, try resolving relative to the prototype root.
     // Example: if prototypeRoot is at /World/trees/pointInstancer/asset and materialPath is /root/Materials/tree_leaves,
@@ -168,11 +221,13 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
     return result;
   }
 
+  console.warn('[MATERIALS] FAILED to resolve material:', materialPath);
   if (USDDEBUG) dbg(`[resolveMaterialBinding]   FAILED to resolve material`);
   return null;
 }
 
 export function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSpec): SdfPrimSpec | null {
+  console.log('[MATERIALS] resolveShaderFromMaterial called for material:', material.path?.primPath);
   // UsdShade commonly uses `outputs:surface.connect`, but MDL/Omniverse materials often use `outputs:mdl:surface.connect`,
   // and MaterialX uses `outputs:mtlx:surface.connect`.
   // We prioritize MaterialX outputs first since they provide more accurate native shader definitions
@@ -191,11 +246,15 @@ export function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSp
     const dv = prop?.defaultValue as any;
     if (dv && typeof dv === 'object' && dv.type === 'sdfpath' && typeof dv.value === 'string') {
       shaderPath = dv.value;
+      console.log('[MATERIALS] Found shader path from output:', k, '->', shaderPath);
       break;
     }
   }
 
-  if (!shaderPath) return null;
+  if (!shaderPath) {
+    console.log('[MATERIALS] No shader path found in material outputs, trying fallback');
+    return null;
+  }
 
   const lastDot = shaderPath.lastIndexOf('.');
   if (lastDot > 0) {
@@ -233,38 +292,52 @@ export function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSp
   };
 
   const shaderName = shaderPath.split('/').pop();
+  console.log('[MATERIALS] Looking for shader:', { shaderPath, shaderName });
   if (shaderName && material.children?.has(shaderName)) {
     const childShader = material.children.get(shaderName);
     if (childShader) {
+      console.log('[MATERIALS] Found shader as child of material:', shaderName);
       if (USDDEBUG) dbg(`[resolveShaderFromMaterial] Found shader as child: ${shaderName}`);
-      return followOutputsToShader(childShader);
+      const resolved = followOutputsToShader(childShader);
+      console.log('[MATERIALS] Resolved shader:', resolved?.path?.primPath, 'type:', resolved?.typeName);
+      return resolved;
     }
   }
 
   // Fallback: try absolute path lookup (works for non-referenced materials)
   const result = findPrimByPath(root, shaderPath);
+  console.log('[MATERIALS] Absolute path lookup:', shaderPath, '->', result?.path?.primPath ?? 'null');
   if (USDDEBUG) dbg(`[resolveShaderFromMaterial] shaderPath=${shaderPath}, shaderName=${shaderName}, foundByAbsPath=${result?.path?.primPath ?? 'null'}`);
-  if (result) return followOutputsToShader(result);
+  if (result) {
+    const resolved = followOutputsToShader(result);
+    console.log('[MATERIALS] Resolved shader from absolute path:', resolved?.path?.primPath, 'type:', resolved?.typeName);
+    return resolved;
+  }
 
   // Last-resort fallback: some composed stages lose/alter `outputs:surface.connect` targets.
   // In that case, try to find *any* Shader under the material prim and use it.
   // This prevents "fully gray" fallback materials when the material binding exists but the connect path doesn't resolve.
+  console.log('[MATERIALS] Trying fallback: searching for any Shader under material');
   const stack: SdfPrimSpec[] = [];
   if (material.children) for (const c of material.children.values()) stack.push(c);
   while (stack.length) {
     const p = stack.pop()!;
     const infoId = p.properties?.get('info:id')?.defaultValue;
     if (p.typeName === 'Shader' || (typeof infoId === 'string' && infoId.length > 0)) {
+      console.log('[MATERIALS] Fallback found shader:', p.path?.primPath, 'info:id:', infoId);
       if (USDDEBUG) {
         // eslint-disable-next-line no-console
         console.warn(
           `[resolveShaderFromMaterial] Fallback-picked shader under material: ${p.path?.primPath} (info:id=${String(infoId)})`,
         );
       }
-      return followOutputsToShader(p);
+      const resolved = followOutputsToShader(p);
+      console.log('[MATERIALS] Resolved fallback shader:', resolved?.path?.primPath);
+      return resolved;
     }
     if (p.children) for (const c of p.children.values()) stack.push(c);
   }
+  console.warn('[MATERIALS] No shader found for material:', material.path?.primPath);
   return null;
 }
 
@@ -513,6 +586,35 @@ export function createMaterialFromShader(
     return createOmniPbrMaterial({ shader, resolveAssetUrl });
   }
 
+  // Generic MDL `sourceAsset` (Omniverse content uses this for many library materials).
+  // We can't execute MDL directly in WebGL, but we can often extract referenced textures and build a PBR approximation.
+  const implProp = shader.properties?.get('info:implementationSource');
+  const implDv: any = implProp?.defaultValue;
+  // Extract string value from token type (usdjs parses tokens as { type: 'token', value: string })
+  const impl = typeof implDv === 'string' ? implDv : (implDv && typeof implDv === 'object' && implDv.type === 'token' ? implDv.value : null);
+  const mdlSourceProp = shader.properties?.get('info:mdl:sourceAsset');
+  const mdlSourceDv: any = mdlSourceProp?.defaultValue;
+  const mdlSource = typeof mdlSourceDv === 'string' ? mdlSourceDv : (mdlSourceDv && typeof mdlSourceDv === 'object' && mdlSourceDv.type === 'asset' ? mdlSourceDv.value : null);
+  const isMdlSourceAsset = impl === 'sourceAsset' && typeof mdlSource === 'string' && mdlSource.length > 0;
+
+  // Log material detection attempts
+  console.log('[MATERIALS] createMaterialFromShader:', {
+    shaderPath: shader.path?.primPath,
+    shaderType,
+    implProp: implProp ? { defaultValue: implDv, extracted: impl } : null,
+    mdlSourceProp: mdlSourceProp ? { defaultValue: mdlSourceDv, extracted: mdlSource } : null,
+    isMdlSourceAsset,
+    isUsdPreviewSurface,
+    isStandardSurface,
+    mdlSubId,
+  });
+
+  if (isMdlSourceAsset) {
+    console.log('[MATERIALS] Creating MDL sourceAsset material for:', shader.path?.primPath, 'MDL:', mdlSource);
+    return createMdlSourceAssetMaterial({ shader, resolveAssetUrl: resolveAssetUrl as any });
+  }
+
+  console.log('[MATERIALS] Falling back to default gray material for:', shader.path?.primPath);
   return new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.8 });
 }
 

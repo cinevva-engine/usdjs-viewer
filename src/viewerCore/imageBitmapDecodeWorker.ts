@@ -26,7 +26,20 @@ async function decodeToImageBitmap(url: string): Promise<ImageBitmap> {
         throw new Error('EXR is not supported by ImageBitmap worker decoder (use EXRLoader path)');
     }
 
-    const resp = await fetch(url, { mode: 'cors', credentials: 'same-origin' as any });
+    // NOTE:
+    // - For same-origin URLs (our `/__usdjs_proxy` and `/__usdjs_corpus` endpoints), we should NOT force CORS mode
+    //   nor credentials. In particular, the proxy sets `Access-Control-Allow-Origin: *` which can conflict with
+    //   credentialed CORS fetches in some browsers/contexts.
+    // - For cross-origin URLs, we want CORS fetch without credentials.
+    let resp: Response;
+    try {
+        const origin = (self as any)?.location?.origin;
+        const isSameOrigin = origin && new URL(url, origin).origin === origin;
+        resp = await fetch(url, isSameOrigin ? undefined : { mode: 'cors', credentials: 'omit' as any });
+    } catch {
+        // Fallback to a plain fetch if URL parsing fails.
+        resp = await fetch(url);
+    }
     if (!resp.ok) throw new Error(`fetch failed: ${resp.status} ${resp.statusText}`);
     const blob = await resp.blob();
 

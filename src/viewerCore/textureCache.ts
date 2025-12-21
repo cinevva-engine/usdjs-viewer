@@ -23,87 +23,87 @@ const pending: Array<() => void> = [];
 const MAX_CONCURRENT_TEXTURE_LOADS = 4;
 
 async function withLoadSlot<T>(fn: () => Promise<T>): Promise<T> {
-  if (activeLoads >= MAX_CONCURRENT_TEXTURE_LOADS) {
-    await new Promise<void>((resolve) => pending.push(resolve));
-  }
-  activeLoads++;
-  try {
-    return await fn();
-  } finally {
-    activeLoads--;
-    const next = pending.shift();
-    if (next) next();
-  }
+    if (activeLoads >= MAX_CONCURRENT_TEXTURE_LOADS) {
+        await new Promise<void>((resolve) => pending.push(resolve));
+    }
+    activeLoads++;
+    try {
+        return await fn();
+    } finally {
+        activeLoads--;
+        const next = pending.shift();
+        if (next) next();
+    }
 }
 
 const loader = new THREE.TextureLoader();
 const exrLoader = new EXRLoader();
 
 function getUrlPathnameLower(url: string): string {
-  try {
-    return new URL(url, 'http://local/').pathname.toLowerCase();
-  } catch {
-    return url.toLowerCase();
-  }
+    try {
+        return new URL(url, 'http://local/').pathname.toLowerCase();
+    } catch {
+        return url.toLowerCase();
+    }
 }
 
 function isExrUrl(url: string): boolean {
-  return getUrlPathnameLower(url).endsWith('.exr');
+    return getUrlPathnameLower(url).endsWith('.exr');
 }
 
 const USDDEBUG =
-  (() => {
-    try {
-      if (typeof window === 'undefined') return false;
-      const q = new URLSearchParams((window as any).location?.search ?? '');
-      if (q.get('usddebug') === '1') return true;
-      if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
-    } catch {
-      // ignore
-    }
-    return false;
-  })();
+    (() => {
+        try {
+            if (typeof window === 'undefined') return false;
+            const q = new URLSearchParams((window as any).location?.search ?? '');
+            if (q.get('usddebug') === '1') return true;
+            if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
+        } catch {
+            // ignore
+        }
+        return false;
+    })();
 
 type TextureDecodeStats = {
-  workerEnabled: boolean;
-  workerCreated: number;
-  workerAttempts: number;
-  workerSuccess: number;
-  workerFailures: number;
-  workerFallbackToTextureLoader: number;
-  baseTextureCacheHits: number;
-  imageBitmapCacheHits: number;
+    workerEnabled: boolean;
+    workerCreated: number;
+    workerAttempts: number;
+    workerSuccess: number;
+    workerFailures: number;
+    workerFallbackToTextureLoader: number;
+    baseTextureCacheHits: number;
+    imageBitmapCacheHits: number;
 };
 
 function getStats(): TextureDecodeStats | null {
-  if (typeof window === 'undefined') return null;
-  const w = window as any;
-  w.__usdjsTextureDecodeStats ??= {
-    // Whether the feature flag is enabled, not whether debug logging is enabled.
-    workerEnabled: USD_IMAGE_BITMAP_DECODE,
-    workerCreated: 0,
-    workerAttempts: 0,
-    workerSuccess: 0,
-    workerFailures: 0,
-    workerFallbackToTextureLoader: 0,
-    baseTextureCacheHits: 0,
-    imageBitmapCacheHits: 0,
-  } satisfies TextureDecodeStats;
-  return w.__usdjsTextureDecodeStats as TextureDecodeStats;
+    if (typeof window === 'undefined') return null;
+    const w = window as any;
+    w.__usdjsTextureDecodeStats ??= {
+        // Whether the feature flag is enabled, not whether debug logging is enabled.
+        workerEnabled: USD_IMAGE_BITMAP_DECODE,
+        workerCreated: 0,
+        workerAttempts: 0,
+        workerSuccess: 0,
+        workerFailures: 0,
+        workerFallbackToTextureLoader: 0,
+        baseTextureCacheHits: 0,
+        imageBitmapCacheHits: 0,
+    } satisfies TextureDecodeStats;
+    return w.__usdjsTextureDecodeStats as TextureDecodeStats;
 }
 
 const USD_IMAGE_BITMAP_DECODE =
-  (() => {
-    try {
-      if (typeof window === 'undefined') return false;
-      const q = new URLSearchParams((window as any).location?.search ?? '');
-      if (q.get('usdimgbitmap') === '1') return true;
-      if (typeof localStorage !== 'undefined' && localStorage.getItem('usdimgbitmap') === '1') return true;
-    } catch {
-      // ignore
-    }
-    return false;
-  })();
+    (() => {
+        try {
+            if (typeof window === 'undefined') return false;
+            const q = new URLSearchParams((window as any).location?.search ?? '');
+            if (q.get('usdimgbitmap') === '1') return true;
+            if (typeof localStorage !== 'undefined' && localStorage.getItem('usdimgbitmap') === '1') return true;
+        } catch {
+            // ignore
+        }
+        return false;
+    })();
 
 /**
  * TODO(perf): move more texture decoding off the main thread.
@@ -128,72 +128,72 @@ const decodePending = new Map<number, { resolve: (b: ImageBitmap) => void; rejec
 let loggedWorkerEnabled = false;
 
 function getDecodeWorker(): Worker {
-  if (decodeWorker) return decodeWorker;
-  // Vite module worker.
-  decodeWorker = new Worker(new URL('./imageBitmapDecodeWorker.ts', import.meta.url), {
-    type: 'module',
-    // Supported in modern browsers; shows up as a friendly thread name in DevTools.
-    name: 'usdjs-image-decode',
-  } as any);
-  const s = getStats();
-  if (s) {
-    s.workerEnabled = USD_IMAGE_BITMAP_DECODE;
-    s.workerCreated++;
-  }
-  decodeWorker.onmessage = (ev: MessageEvent<WorkerRes>) => {
-    const msg = ev.data as any;
-    const p = decodePending.get(msg?.id);
-    if (!p) return;
-    decodePending.delete(msg.id);
-    if (msg.ok) p.resolve(msg.bitmap);
-    else p.reject(new Error(msg.error || 'ImageBitmap decode failed'));
-  };
-  decodeWorker.onerror = (err) => {
-    // Fail all pending requests; worker will be recreated on next request.
-    for (const [, p] of decodePending) p.reject(err);
-    decodePending.clear();
-    try {
-      decodeWorker?.terminate();
-    } catch {
-      // ignore
-    }
-    decodeWorker = null;
-  };
-
-  if (USDDEBUG && USD_IMAGE_BITMAP_DECODE && !loggedWorkerEnabled) {
-    loggedWorkerEnabled = true;
+    if (decodeWorker) return decodeWorker;
+    // Vite module worker.
+    decodeWorker = new Worker(new URL('./imageBitmapDecodeWorker.ts', import.meta.url), {
+        type: 'module',
+        // Supported in modern browsers; shows up as a friendly thread name in DevTools.
+        name: 'usdjs-image-decode',
+    } as any);
     const s = getStats();
-    if (s) s.workerEnabled = true;
-    // eslint-disable-next-line no-console
-    console.log('[usdjs-viewer:textureCache] ImageBitmap worker decode enabled (usdimgbitmap=1)');
-  }
-  return decodeWorker;
+    if (s) {
+        s.workerEnabled = USD_IMAGE_BITMAP_DECODE;
+        s.workerCreated++;
+    }
+    decodeWorker.onmessage = (ev: MessageEvent<WorkerRes>) => {
+        const msg = ev.data as any;
+        const p = decodePending.get(msg?.id);
+        if (!p) return;
+        decodePending.delete(msg.id);
+        if (msg.ok) p.resolve(msg.bitmap);
+        else p.reject(new Error(msg.error || 'ImageBitmap decode failed'));
+    };
+    decodeWorker.onerror = (err) => {
+        // Fail all pending requests; worker will be recreated on next request.
+        for (const [, p] of decodePending) p.reject(err);
+        decodePending.clear();
+        try {
+            decodeWorker?.terminate();
+        } catch {
+            // ignore
+        }
+        decodeWorker = null;
+    };
+
+    if (USDDEBUG && USD_IMAGE_BITMAP_DECODE && !loggedWorkerEnabled) {
+        loggedWorkerEnabled = true;
+        const s = getStats();
+        if (s) s.workerEnabled = true;
+        // eslint-disable-next-line no-console
+        console.log('[usdjs-viewer:textureCache] ImageBitmap worker decode enabled (usdimgbitmap=1)');
+    }
+    return decodeWorker;
 }
 
 async function decodeImageBitmapInWorker(url: string): Promise<ImageBitmap> {
-  const s = getStats();
-  if (s) s.workerAttempts++;
-  const t0 = typeof performance !== 'undefined' && performance.now ? performance.now() : 0;
-  const w = getDecodeWorker();
-  const id = ++decodeSeq;
-  const req: WorkerReq = { id, url };
-  const p = new Promise<ImageBitmap>((resolve, reject) => {
-    decodePending.set(id, { resolve, reject });
-  });
-  w.postMessage(req);
-  try {
-    const bm = await p;
-    if (s) s.workerSuccess++;
-    if (USDDEBUG && typeof performance !== 'undefined' && performance.now) {
-      const ms = performance.now() - t0;
-      // eslint-disable-next-line no-console
-      console.log('[usdjs-viewer:textureCache] worker decoded image', { url, ms: +ms.toFixed(1) });
+    const s = getStats();
+    if (s) s.workerAttempts++;
+    const t0 = typeof performance !== 'undefined' && performance.now ? performance.now() : 0;
+    const w = getDecodeWorker();
+    const id = ++decodeSeq;
+    const req: WorkerReq = { id, url };
+    const p = new Promise<ImageBitmap>((resolve, reject) => {
+        decodePending.set(id, { resolve, reject });
+    });
+    w.postMessage(req);
+    try {
+        const bm = await p;
+        if (s) s.workerSuccess++;
+        if (USDDEBUG && typeof performance !== 'undefined' && performance.now) {
+            const ms = performance.now() - t0;
+            // eslint-disable-next-line no-console
+            console.log('[usdjs-viewer:textureCache] worker decoded image', { url, ms: +ms.toFixed(1) });
+        }
+        return bm;
+    } catch (e) {
+        if (s) s.workerFailures++;
+        throw e;
     }
-    return bm;
-  } catch (e) {
-    if (s) s.workerFailures++;
-    throw e;
-  }
 }
 
 // Apply throttling: when many textures resolve at once, updating materials immediately can
@@ -203,91 +203,107 @@ let applyScheduled = false;
 const MAX_APPLIES_PER_FRAME = 6;
 
 export function deferTextureApply(fn: () => void) {
-  // In non-browser contexts, just run synchronously.
-  if (typeof window === 'undefined' || typeof requestAnimationFrame === 'undefined') {
-    fn();
-    return;
-  }
-  applyQueue.push(fn);
-  if (applyScheduled) return;
-  applyScheduled = true;
-  requestAnimationFrame(() => {
-    applyScheduled = false;
-    const n = Math.min(MAX_APPLIES_PER_FRAME, applyQueue.length);
-    for (let i = 0; i < n; i++) {
-      const f = applyQueue.shift();
-      try {
-        f?.();
-      } catch {
-        // ignore
-      }
+    // In non-browser contexts, just run synchronously.
+    if (typeof window === 'undefined' || typeof requestAnimationFrame === 'undefined') {
+        fn();
+        return;
     }
-    // If there is more work, schedule another frame.
-    if (applyQueue.length) deferTextureApply(() => {});
-  });
+    applyQueue.push(fn);
+    if (applyScheduled) return;
+    applyScheduled = true;
+    requestAnimationFrame(() => {
+        applyScheduled = false;
+        const n = Math.min(MAX_APPLIES_PER_FRAME, applyQueue.length);
+        for (let i = 0; i < n; i++) {
+            const f = applyQueue.shift();
+            try {
+                f?.();
+            } catch {
+                // ignore
+            }
+        }
+        // If there is more work, schedule another frame.
+        if (applyQueue.length) deferTextureApply(() => { });
+    });
 }
 
 export async function getOrLoadTexture(url: string): Promise<THREE.Texture> {
-  if (!url) throw new Error('getOrLoadTexture: url is empty');
+    if (!url) throw new Error('getOrLoadTexture: url is empty');
 
-  const cached = baseTextureByUrl.get(url);
-  if (cached) {
-    const s = getStats();
-    if (s) s.baseTextureCacheHits++;
-    return cached;
-  }
-
-  const p = withLoadSlot(async () => {
-    // EXR: must use EXRLoader (DataTexture). Skip ImageBitmap worker path.
-    if (isExrUrl(url)) {
-      const tex = (await exrLoader.loadAsync(url)) as unknown as THREE.Texture;
-      tex.needsUpdate = true;
-      return tex;
+    const cached = baseTextureByUrl.get(url);
+    if (cached) {
+        console.log('[TEXTURE] Using cached promise for:', url);
+        const s = getStats();
+        if (s) s.baseTextureCacheHits++;
+        return cached;
     }
 
-    // Optional: decode in worker via ImageBitmap, then create a Three texture from it.
-    // Fallback: TextureLoader.loadAsync (HTMLImageElement decode on main).
-    if (USD_IMAGE_BITMAP_DECODE && typeof createImageBitmap !== 'undefined') {
-      try {
-        const existingBm = imageBitmapByUrl.get(url);
-        const s = getStats();
-        if (existingBm && s) s.imageBitmapCacheHits++;
+    console.log('[TEXTURE] Creating new texture load promise for:', url);
+    const p = withLoadSlot(async () => {
+        console.log('[TEXTURE] Starting texture load for:', url);
+        // EXR: must use EXRLoader (DataTexture). Skip ImageBitmap worker path.
+        if (isExrUrl(url)) {
+            const tex = (await exrLoader.loadAsync(url)) as unknown as THREE.Texture;
+            tex.needsUpdate = true;
+            return tex;
+        }
 
-        const bitmapPromise = existingBm ?? (async () => await decodeImageBitmapInWorker(url))();
-        imageBitmapByUrl.set(url, bitmapPromise);
-        const bitmap = await bitmapPromise;
+        // Optional: decode in worker via ImageBitmap, then create a Three texture from it.
+        // Fallback: TextureLoader.loadAsync (HTMLImageElement decode on main).
+        // Some browsers/environments are finicky about fetch+ImageBitmap in workers for our proxy endpoint.
+        // Since TextureLoader is robust here (and already same-origin), skip the worker path for __usdjs_proxy.
+        const isProxyUrl = (() => {
+            try {
+                const u = new URL(url, 'http://local/');
+                return u.pathname.includes('/__usdjs_proxy');
+            } catch {
+                return url.includes('/__usdjs_proxy');
+            }
+        })();
 
-        // Construct a base texture from ImageBitmap. We keep flipY=false because the worker
-        // requested imageOrientation=flipY where supported (matching Three's ImageBitmapLoader convention).
-        const tex = new THREE.Texture(bitmap as any);
-        tex.flipY = false;
+        if (!isProxyUrl && USD_IMAGE_BITMAP_DECODE && typeof createImageBitmap !== 'undefined') {
+            try {
+                const existingBm = imageBitmapByUrl.get(url);
+                const s = getStats();
+                if (existingBm && s) s.imageBitmapCacheHits++;
+
+                const bitmapPromise = existingBm ?? (async () => await decodeImageBitmapInWorker(url))();
+                imageBitmapByUrl.set(url, bitmapPromise);
+                const bitmap = await bitmapPromise;
+
+                // Construct a base texture from ImageBitmap. We keep flipY=false because the worker
+                // requested imageOrientation=flipY where supported (matching Three's ImageBitmapLoader convention).
+                const tex = new THREE.Texture(bitmap as any);
+                tex.flipY = false;
+                tex.needsUpdate = true;
+                return tex;
+            } catch {
+                // allow retry later + fall back
+                imageBitmapByUrl.delete(url);
+                const s = getStats();
+                if (s) s.workerFallbackToTextureLoader++;
+            }
+        }
+
+        // TextureLoader.loadAsync caches at the browser/network layer, but not decode.
+        // Sharing the base texture avoids duplicate decodes for identical URLs.
+        console.log('[TEXTURE] Calling loader.loadAsync for:', url);
+        const tex = await loader.loadAsync(url);
+        console.log('[TEXTURE] loader.loadAsync completed for:', url, 'texture:', tex);
         tex.needsUpdate = true;
         return tex;
-      } catch {
-        // allow retry later + fall back
-        imageBitmapByUrl.delete(url);
-        const s = getStats();
-        if (s) s.workerFallbackToTextureLoader++;
-      }
+    });
+
+    // Store promise immediately to dedupe in-flight loads.
+    baseTextureByUrl.set(url, p);
+
+    try {
+        return await p;
+    } catch (e) {
+        // If the load failed, allow future retries.
+        baseTextureByUrl.delete(url);
+        throw e;
     }
-
-    // TextureLoader.loadAsync caches at the browser/network layer, but not decode.
-    // Sharing the base texture avoids duplicate decodes for identical URLs.
-    const tex = await loader.loadAsync(url);
-    tex.needsUpdate = true;
-    return tex;
-  });
-
-  // Store promise immediately to dedupe in-flight loads.
-  baseTextureByUrl.set(url, p);
-
-  try {
-    return await p;
-  } catch (e) {
-    // If the load failed, allow future retries.
-    baseTextureByUrl.delete(url);
-    throw e;
-  }
 }
 
 /**
@@ -295,19 +311,22 @@ export async function getOrLoadTexture(url: string): Promise<THREE.Texture> {
  * The clone shares the underlying image, so decoding is still deduped by URL.
  */
 export async function getOrLoadTextureClone(
-  url: string,
-  configure?: (tex: THREE.Texture) => void,
+    url: string,
+    configure?: (tex: THREE.Texture) => void,
 ): Promise<THREE.Texture> {
-  const base = await getOrLoadTexture(url);
-  const tex = cloneTexturePreserveParams(base);
-  configure?.(tex);
-  tex.needsUpdate = true;
-  return tex;
+    console.log('[TEXTURE] getOrLoadTextureClone called for:', url);
+    const base = await getOrLoadTexture(url);
+    console.log('[TEXTURE] getOrLoadTexture returned for:', url, 'base texture:', base);
+    const tex = cloneTexturePreserveParams(base);
+    configure?.(tex);
+    tex.needsUpdate = true;
+    console.log('[TEXTURE] getOrLoadTextureClone returning texture for:', url);
+    return tex;
 }
 
 export function clearTextureCache() {
-  baseTextureByUrl.clear();
-  imageBitmapByUrl.clear();
+    baseTextureByUrl.clear();
+    imageBitmapByUrl.clear();
 }
 
 

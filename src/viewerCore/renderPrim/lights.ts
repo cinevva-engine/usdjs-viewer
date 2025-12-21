@@ -2,12 +2,15 @@ import * as THREE from 'three';
 import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { getPrimProp } from '../usdAnim';
+import { resolveMaterialBinding, resolveShaderFromMaterial } from '../materials';
+import { getMdlEnvironmentAsset } from '../materials/mdlSourceAsset';
 
 export function renderUsdLightPrim(opts: {
   typeName: string;
   container: THREE.Object3D;
   helpersParent: THREE.Object3D;
   prim: SdfPrimSpec;
+  rootPrim: SdfPrimSpec;
   unitScale: number;
   dynamicHelperUpdates: Array<() => void>;
   hasUsdLightsRef: { value: boolean };
@@ -27,6 +30,7 @@ export function renderUsdLightPrim(opts: {
     container,
     helpersParent,
     prim,
+    rootPrim,
     unitScale,
     dynamicHelperUpdates,
     hasUsdLightsRef,
@@ -237,6 +241,12 @@ export function renderUsdLightPrim(opts: {
       // DomeLight is environment lighting. If a latlong texture is provided, load it and set scene.environment.
       // Otherwise, fall back to a simple hemispherical ambient approximation.
       const texVal = getPrimProp(prim, 'inputs:texture:file') ?? getPrimProp(prim, 'texture:file');
+      console.log('[DomeLight] Raw texture property:', {
+        primPath: prim.path?.primPath,
+        texVal,
+        hasInputsTextureFile: !!getPrimProp(prim, 'inputs:texture:file'),
+        hasTextureFile: !!getPrimProp(prim, 'texture:file'),
+      });
       const texAsset =
         texVal && typeof texVal === 'object' && (texVal as any).type === 'asset' && typeof (texVal as any).value === 'string'
           ? (() => {
@@ -245,7 +255,15 @@ export function renderUsdLightPrim(opts: {
             const fromId = typeof (texVal as any).__fromIdentifier === 'string' ? ((texVal as any).__fromIdentifier as string) : null;
             const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
             const normRaw = stripCorpusPrefix(raw);
-            return normFromId ? resolveAssetPath(normRaw, normFromId) : normRaw;
+            const resolved = normFromId ? resolveAssetPath(normRaw, normFromId) : normRaw;
+            console.log('[DomeLight] Texture asset resolution steps:', {
+              raw,
+              fromId,
+              normFromId,
+              normRaw,
+              resolved,
+            });
+            return resolved;
           })()
           : null;
       const fmtVal = getPrimProp(prim, 'inputs:texture:format') ?? getPrimProp(prim, 'texture:format');
@@ -256,10 +274,37 @@ export function renderUsdLightPrim(opts: {
             ? ((fmtVal as any).value as string)
             : null;
 
+      const isProbablyFileUrl = (u: string): boolean => {
+        try {
+          const x = new URL(u, 'http://local/');
+          const p = x.pathname;
+          if (!p) return false;
+          if (p.endsWith('/')) return false;
+          const last = p.split('/').pop() ?? '';
+          // If there's no dot at all, it's very likely a directory or bare name.
+          return last.includes('.');
+        } catch {
+          if (u.endsWith('/')) return false;
+          const last = u.split('/').pop() ?? '';
+          return last.includes('.');
+        }
+      };
+
       if (texAsset && resolveAssetUrl && domeEnv) {
         hasUsdDomeLightRef.value = true;
         const url = resolveAssetUrl(texAsset);
-        if (url) {
+        // Check the original texAsset URL for file extension, not the proxy URL
+        // (proxy URLs like /__usdjs_proxy?url=... don't have extensions in their pathname)
+        const isFile = isProbablyFileUrl(texAsset);
+        console.log('[DomeLight] Texture asset resolution:', {
+          primPath: prim.path?.primPath,
+          texAsset,
+          resolvedUrl: url,
+          isFileUrl: isFile,
+          format: fmt,
+        });
+        // Some assets (Omniverse templates) incorrectly resolve to a directory; skip to avoid 404 spam.
+        if (url && isFile) {
           const q = new THREE.Quaternion();
           container.getWorldQuaternion(q);
           domeEnv.setFromDomeLight({
@@ -268,8 +313,49 @@ export function renderUsdLightPrim(opts: {
             worldQuaternion: q,
             intensity: intensityBase,
           });
+        } else {
+          // Allow MDL environment fallback below (or hemisphere).
+          console.warn('[DomeLight] Skipping texture load - not a file URL:', {
+            url,
+            texAsset,
+            reason: url ? 'does not look like a file (no extension or ends with /)' : 'resolveAssetUrl returned null',
+          });
+          hasUsdDomeLightRef.value = false;
         }
       } else {
+        // Fallback: if this DomeLight is bound to an MDL "sourceAsset" sky material, try to extract an HDR/EXR
+        // referenced by that MDL module and use it as the environment.
+        if (resolveAssetUrl && domeEnv) {
+          try {
+            const matPrim = resolveMaterialBinding(prim, rootPrim);
+            const shaderPrim = matPrim ? resolveShaderFromMaterial(matPrim, rootPrim) : null;
+            if (shaderPrim) {
+              void (async () => {
+                const envAsset = await getMdlEnvironmentAsset({
+                  shader: shaderPrim,
+                  resolveAssetUrl: (p) => resolveAssetUrl(p),
+                });
+                if (!envAsset) return;
+                const url = resolveAssetUrl(envAsset);
+                if (!url) return;
+                const q = new THREE.Quaternion();
+                container.getWorldQuaternion(q);
+                hasUsdDomeLightRef.value = true;
+                domeEnv.setFromDomeLight({
+                  assetPath: url,
+                  format: fmt ?? 'latlong',
+                  worldQuaternion: q,
+                  intensity: intensityBase,
+                });
+              })();
+              hasUsdLightsRef.value = true;
+              return true;
+            }
+          } catch {
+            // ignore; fall back to hemisphere below
+          }
+        }
+
         const light = new THREE.HemisphereLight(lightColor, new THREE.Color(0x000000), intensityBase / 1000);
         container.add(light);
       }

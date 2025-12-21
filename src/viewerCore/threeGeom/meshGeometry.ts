@@ -371,6 +371,11 @@ export function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.
             out[i * 2 + 1] = st[sOff + 1] ?? 0;
         }
         geom.setAttribute('uv', new THREE.BufferAttribute(out, 2));
+        // Three.js AO/light maps expect a secondary UV set (`uv2`). Many USD assets only author one UV set (primvars:st).
+        // To support common packed maps (like OmniPBR ORM where AO uses the red channel), alias uv -> uv2 when missing.
+        if (!(geom as any).getAttribute?.('uv2')) {
+            geom.setAttribute('uv2', new THREE.BufferAttribute(out.slice(), 2));
+        }
     }
 
     // If normals are vertex-interpolated and match point count, attach them directly.

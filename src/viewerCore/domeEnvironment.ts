@@ -16,10 +16,16 @@ export function createDomeEnvironmentController(opts: {
     format: string | null;
     worldQuaternion: THREE.Quaternion;
     intensity: number;
+    onSuccess?: () => void;
+    onError?: (err: unknown) => void;
   }) => {
-    const { assetPath, format, worldQuaternion, intensity } = optsIn;
+    const { assetPath, format, worldQuaternion, intensity, onSuccess, onError } = optsIn;
     // Only latlong is supported right now (matches ft-lab dome_light.usda).
-    if (format && format !== 'latlong') return;
+    if (format && format !== 'latlong') {
+      console.warn('[DomeLight] Unsupported format:', format, 'only latlong is supported');
+      onError?.(new Error(`Unsupported format: ${format}`));
+      return;
+    }
     const token = ++domeLoadToken;
 
     // Determine loader based on file extension
@@ -32,7 +38,8 @@ export function createDomeEnvironmentController(opts: {
         return;
       }
       if (!tex) {
-        console.warn('DomeLight texture load returned null:', assetPath);
+        console.warn('[DomeLight] Texture load returned null:', assetPath);
+        onError?.(new Error('Texture load returned null'));
         return;
       }
 
@@ -45,29 +52,30 @@ export function createDomeEnvironmentController(opts: {
       scene.environment = domeEnvRt.texture;
       // Also show the dome as background (otherwise the viewer keeps a solid background color).
       scene.background = domeEnvRt.texture;
-      // Orientation (spec-based, no guessing):
-      // - OpenUSD DomeLight follows the OpenEXR latlong convention:
-      //     longitude 0 points +Z, longitude π/2 points +X (DomeLight.md).
-      // - Three.js equirectangular sampling uses longitude 0 at +X (atan2(z,x)), so we need a fixed -90° yaw.
-      // - Three applies `environmentRotation`/`backgroundRotation` by rotating the lookup vector, so to
-      //   "rotate the dome" by R we must apply R^{-1} to the lookup.
-      const qInv = worldQuaternion.clone().invert();
-      // OpenUSD DomeLight latlong follows the OpenEXR convention (DomeLight.md).
-      // Three samples latlong using `equirectUv(dir)`:
-      //   u = atan(dir.z, dir.x) / (2π) + 0.5
-      // OpenEXR latlong defines longitude such that:
-      //   longitude 0 points +Z; longitude π/2 points +X.
-      // This corresponds to longitude = atan2(x, z) (note the swapped args), and OpenEXR's x axis runs
-      // from +π at min.x to -π at max.x (i.e. u ∝ -longitude).
+      
+      // Coordinate system conversion between OpenEXR/USD and Three.js:
       //
-      // The exact direction-space mapping that makes Three's `atan(dir.z, dir.x)` match OpenEXR's
-      // `-atan2(x,z)` is:
-      //   dir' = RotY(+π/2) * dir   (x' = z, z' = -x)
+      // Three.js equirectUv(): u = atan(dir.z, dir.x) / (2π) + 0.5
+      //   - dir = +X (1,0,0): u = 0.5 (center of texture)
+      //   - dir = +Z (0,0,1): u = 0.75 (right of center)
+      //   - Three.js longitude 0 (u=0.5) is at +X direction
       //
-      // Finally, DomeLight xform rotates the dome in world; to sample in dome-local space we apply R^{-1}.
-      const qCorr = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), +Math.PI / 2);
-      const qFinal = qInv.multiply(qCorr); // first OpenEXR→Three basis correction (world), then inverse dome rotation
-      const eFinal = new THREE.Euler().setFromQuaternion(qFinal, 'XYZ');
+      // OpenEXR/USD latlong convention (from DomeLight spec):
+      //   - Longitude 0 points into +Z direction (center of texture)
+      //   - Longitude π/2 points into +X direction
+      //   - OpenEXR longitude 0 is at +Z direction
+      //
+      // backgroundRotation/environmentRotation rotates the lookup direction BEFORE sampling.
+      // To map: when looking at +X (Three.js center), sample +Z (OpenEXR center)
+      // RotY(+90°): +X → +Z ✓
+      //
+      // TODO: The DomeLight's authored xform rotation (worldQuaternion) is currently ignored.
+      // Many USD scenes author DomeLight rotations that expect specific HDRI orientations.
+      // A proper implementation would compose: qCoordConv * qDomeInv (apply dome inverse first,
+      // then coordinate conversion). However, the USD row-vector to Three.js column-vector
+      // conversion and quaternion composition order needs careful verification.
+      const qCoordConv = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2);
+      const eFinal = new THREE.Euler().setFromQuaternion(qCoordConv, 'XYZ');
       scene.environmentRotation.copy(eFinal);
       scene.backgroundRotation.copy(eFinal);
       // USD intensity is luminance in nits (cd/m^2). Three.js Scene.environmentIntensity is a unitless scalar,
@@ -75,6 +83,8 @@ export function createDomeEnvironmentController(opts: {
       const USD_NITS_TO_THREE = 8000;
       scene.environmentIntensity = intensity / USD_NITS_TO_THREE;
       scene.backgroundIntensity = scene.environmentIntensity;
+      console.log('[DomeLight] Environment texture loaded successfully:', assetPath);
+      onSuccess?.();
     };
 
     if (isHDR) {

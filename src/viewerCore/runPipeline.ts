@@ -290,7 +290,18 @@ export function createRunPipeline(opts: {
         hemisphereLight.visible = false;
         defaultDir.visible = false;
         // Keep authored DomeLight environment; otherwise disable IBL to avoid double-lighting.
-        if (!hasUsdDomeLightRef.value) scene.environment = null;
+        // BUT: if DomeLight was detected but its texture failed to load, fall back to default lighting
+        // to avoid completely dark scenes (textures won't be visible without any lighting).
+        if (!hasUsdDomeLightRef.value) {
+          scene.environment = null;
+          // Fallback: if DomeLight texture failed, enable default lights so textures are visible
+          hemisphereLight.visible = true;
+          defaultDir.visible = true;
+          hemisphereLight.intensity = 0.4;
+          defaultDir.intensity = 0.8;
+          scene.environment = defaultEnvTex;
+          scene.environmentIntensity = 0.2;
+        }
       } else {
         // No authored lights: enable viewer defaults.
         // Keep intensities low since RoomEnvironment IBL provides ambient fill.
