@@ -64,6 +64,10 @@ export function renderPrim(
   currentIdentifier?: string,
   animatedObjects?: AnimatedObject[],
 ) {
+  // USD prim metadata: `active = false` means the prim and its subtree are not traversed/rendered.
+  // We also prune these in `buildTree()`, but keep this guard as defense-in-depth.
+  if ((node.prim.metadata as any)?.active === false) return;
+
   const container = new THREE.Object3D();
   container.name = node.path;
   applyXformOps(container, node.prim, undefined, unitScale);
