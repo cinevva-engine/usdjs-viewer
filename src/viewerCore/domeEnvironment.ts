@@ -2,6 +2,43 @@ import * as THREE from 'three';
 import { EXRLoader } from 'three/examples/jsm/loaders/EXRLoader.js';
 import { HDRLoader } from 'three/examples/jsm/loaders/HDRLoader.js';
 
+// Omniverse CDN base URL for fallback when local corpus assets are missing
+const OMNIVERSE_CDN_BASE = 'http://omniverse-content-production.s3-us-west-2.amazonaws.com/';
+
+/**
+ * Try to extract a CDN fallback URL from a corpus URL.
+ * If the corpus URL points to nvidia-omniverse-scene-templates, extract the relative path
+ * and construct an Omniverse CDN URL.
+ */
+function getCdnFallbackUrl(corpusUrl: string): string | null {
+  // Check if this is a corpus URL
+  if (!corpusUrl.includes('/__usdjs_corpus?file=')) {
+    return null;
+  }
+
+  // Decode the file parameter
+  try {
+    const url = new URL(corpusUrl, 'http://localhost');
+    const filePath = url.searchParams.get('file');
+    if (!filePath) return null;
+
+    const decoded = decodeURIComponent(filePath);
+    
+    // Look for nvidia-omniverse-scene-templates and extract the path after Assets/
+    const marker = 'nvidia-omniverse-scene-templates/Assets/';
+    const idx = decoded.indexOf(marker);
+    if (idx === -1) return null;
+
+    const relativePath = decoded.substring(idx + marker.length);
+    const cdnUrl = OMNIVERSE_CDN_BASE + 'Assets/' + relativePath;
+    
+    // Return as proxy URL to avoid CORS issues
+    return '/__usdjs_proxy?url=' + encodeURIComponent(cdnUrl);
+  } catch {
+    return null;
+  }
+}
+
 export function createDomeEnvironmentController(opts: {
   scene: THREE.Scene;
   pmremGen: THREE.PMREMGenerator;
@@ -87,45 +124,59 @@ export function createDomeEnvironmentController(opts: {
       onSuccess?.();
     };
 
+    // Helper to load with CDN fallback
+    const loadWithFallback = (
+      url: string,
+      Loader: typeof HDRLoader | typeof EXRLoader,
+      onFail: (err: unknown) => void,
+    ) => {
+      new Loader().load(
+        url,
+        (tex: THREE.DataTexture) => handleTexture(tex),
+        undefined,
+        (err: unknown) => {
+          // Check if we can try CDN fallback
+          const fallbackUrl = getCdnFallbackUrl(url);
+          if (fallbackUrl) {
+            console.log('[DomeLight] Local corpus asset not found, trying CDN fallback:', fallbackUrl);
+            new Loader().load(
+              fallbackUrl,
+              (tex: THREE.DataTexture) => handleTexture(tex),
+              undefined,
+              (err2: unknown) => {
+                console.error('[DomeLight] CDN fallback also failed:', fallbackUrl, err2);
+                onFail(err2);
+              },
+            );
+          } else {
+            onFail(err);
+          }
+        },
+      );
+    };
+
     if (isHDR) {
       // Use HDRLoader for HDR files
-      new HDRLoader().load(
-        assetPath,
-        (tex: THREE.DataTexture) => handleTexture(tex),
-        undefined,
-        (err: unknown) => {
-          console.error('DomeLight HDR load failed:', assetPath, err);
-        },
-      );
+      loadWithFallback(assetPath, HDRLoader, (err) => {
+        console.error('[DomeLight] HDR load failed:', assetPath, err);
+        onError?.(err);
+      });
     } else if (isEXR) {
       // Use EXRLoader for EXR files
-      new EXRLoader().load(
-        assetPath,
-        (tex: THREE.DataTexture) => handleTexture(tex),
-        undefined,
-        (err: unknown) => {
-          console.error('DomeLight EXR load failed:', assetPath, err);
-        },
-      );
+      loadWithFallback(assetPath, EXRLoader, (err) => {
+        console.error('[DomeLight] EXR load failed:', assetPath, err);
+        onError?.(err);
+      });
     } else {
-      // Try EXR first (default), fall back gracefully
-      new EXRLoader().load(
-        assetPath,
-        (tex: THREE.DataTexture) => handleTexture(tex),
-        undefined,
-        (err: unknown) => {
-          // If EXR fails, try HDR
-          console.warn('DomeLight EXR load failed, trying HDR:', assetPath, err);
-          new HDRLoader().load(
-            assetPath,
-            (tex: THREE.DataTexture) => handleTexture(tex),
-            undefined,
-            (err2: unknown) => {
-              console.error('DomeLight HDR load also failed:', assetPath, err2);
-            },
-          );
-        },
-      );
+      // Try EXR first (default), fall back to HDR
+      loadWithFallback(assetPath, EXRLoader, () => {
+        // If EXR fails, try HDR (also with CDN fallback)
+        console.warn('[DomeLight] EXR load failed, trying HDR:', assetPath);
+        loadWithFallback(assetPath, HDRLoader, (err2) => {
+          console.error('[DomeLight] HDR load also failed:', assetPath, err2);
+          onError?.(err2);
+        });
+      });
     }
   };
 
