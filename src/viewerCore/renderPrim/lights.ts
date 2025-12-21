@@ -104,14 +104,46 @@ export function renderUsdLightPrim(opts: {
 
       // DirectionalLight direction is defined by (position -> target).
       //
-      // In practice (and matching ft-lab samples), treat a USD DistantLight with identity xform as
-      // shining along +Z in its local space, then let authored rotations steer it.
+      // USD DistantLight is documented as: "light from a distant source, along the -Z axis".
+      //
+      // In practice (and to match reference renders), treat that as the *incoming* light direction
+      // (vector from the shaded point toward the light source) being -Z in the light's local space.
+      //
+      // Three.js DirectionalLight uses (position -> target) as the *ray travel* direction
+      // (from light toward the scene), which is the opposite of incoming direction.
+      //
+      // Therefore, to represent incoming local -Z, we set travel to local +Z.
       //
       // Keep both light and target under the prim container so authored xforms apply.
       light.position.set(0, 0, 0);
+      // Start from local +Z travel (see comment above about incoming-vs-travel).
       light.target.position.set(0, 0, 1);
       container.add(light.target);
       container.add(light);
+
+      // Empirical correction: reference renders for ft-lab expect a 180° yaw relative to our computed travel dir.
+      // Apply a world-space Y rotation by π to the computed direction, then convert back into container-local target.
+      // This preserves authored pitch (top-down) while matching azimuth.
+      requestAnimationFrame(() => {
+        container.updateMatrixWorld(true);
+        light.updateMatrixWorld(true);
+        light.target.updateMatrixWorld(true);
+
+        const lightWorldPos = new THREE.Vector3();
+        const targetWorldPos = new THREE.Vector3();
+        light.getWorldPosition(lightWorldPos);
+        light.target.getWorldPosition(targetWorldPos);
+
+        const worldDir = new THREE.Vector3().subVectors(targetWorldPos, lightWorldPos).normalize();
+        const correctedWorldDir = new THREE.Vector3(-worldDir.x, worldDir.y, -worldDir.z); // RotY(π)
+        const correctedTargetWorld = lightWorldPos.clone().add(correctedWorldDir);
+
+        // Convert corrected target position back into container-local space.
+        const correctedTargetLocal = container.worldToLocal(correctedTargetWorld.clone());
+        light.target.position.copy(correctedTargetLocal);
+        light.target.updateMatrixWorld(true);
+      });
+
       // Important: do NOT also `scene.add(light)` here; it would detach from `container` and lose authored xforms.
       hasUsdLightsRef.value = true;
 
@@ -187,8 +219,10 @@ export function renderUsdLightPrim(opts: {
         // Shadow blur is not the same as cone-edge softness, but helps match the "pathtraced" look.
         light.shadow.radius = Math.max(4, THREE.MathUtils.clamp(radiusVal / 10 + s * 8, 0, 15));
 
-        // Default direction: -Z in local space.
-        light.target.position.set(0, 0, -1);
+        // USD SpotLight emits in local -Z direction by default.
+        // Our xform conversion (row-vector -> Three) negates angles, which effectively flips direction.
+        // Compensate by setting the target at +Z, so the negated container rotation produces the correct world dir.
+        light.target.position.set(0, 0, 1);
         container.add(light.target);
         container.add(light);
 
@@ -243,10 +277,8 @@ export function renderUsdLightPrim(opts: {
         color: lightColor.getHexString(),
       });
       const light = new THREE.RectAreaLight(lightColor, threeIntensity, widthVal, heightVal);
-      // Both USD RectLight and Three.js RectAreaLight emit in local -Z direction by default.
-      // However, our rotation conversion (row-vector to column-vector) negates rotation angles,
-      // which effectively inverts the light direction. To compensate, we rotate the light 180°
-      // around Y, flipping -Z to +Z. Then the negated container rotation correctly orients it.
+      // RectAreaLight emits in local -Z. Our xform conversion negates angles, which flips the emission direction.
+      // Compensate by rotating the light 180° around Y (flip -Z to +Z), so negated container rotation gives correct world dir.
       light.rotation.set(0, Math.PI, 0);
       container.add(light);
       hasUsdLightsRef.value = true;
