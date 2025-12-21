@@ -231,11 +231,24 @@ export function renderUsdLightPrim(opts: {
       const area = Math.max(0, widthVal) * Math.max(0, heightVal);
       const L = normalize && area > 0 ? intensityBase / area : intensityBase; // nits (cd/m^2)
       const USD_NITS_TO_THREE_NITS = 8000; // viewer calibration constant (keep consistent with SphereLight mapping)
-      const light = new THREE.RectAreaLight(lightColor, L / USD_NITS_TO_THREE_NITS, widthVal, heightVal);
-      light.position.set(0, 0, 0);
-      light.lookAt(0, 0, -1);
+      const threeIntensity = L / USD_NITS_TO_THREE_NITS;
+      console.log('[RectLight]', prim.path?.primPath, {
+        usdIntensity: intensityBase,
+        normalize,
+        area,
+        L,
+        threeIntensity,
+        width: widthVal,
+        height: heightVal,
+        color: lightColor.getHexString(),
+      });
+      const light = new THREE.RectAreaLight(lightColor, threeIntensity, widthVal, heightVal);
+      // Both USD RectLight and Three.js RectAreaLight emit in local -Z direction by default.
+      // However, our rotation conversion (row-vector to column-vector) negates rotation angles,
+      // which effectively inverts the light direction. To compensate, we rotate the light 180°
+      // around Y, flipping -Z to +Z. Then the negated container rotation correctly orients it.
+      light.rotation.set(0, Math.PI, 0);
       container.add(light);
-      // Important: keep it parented under `container` so authored xforms apply.
       hasUsdLightsRef.value = true;
     } else if (typeName === 'DomeLight') {
       // DomeLight is environment lighting. If a latlong texture is provided, load it and set scene.environment.

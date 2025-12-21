@@ -286,21 +286,13 @@ export function createRunPipeline(opts: {
       });
 
       if (hasUsdLightsRef.value) {
-        // Authored lights present: disable viewer defaults (including IBL) to avoid double-lighting.
+        // Authored lights present: disable viewer defaults to respect scene author's lighting design.
         hemisphereLight.visible = false;
         defaultDir.visible = false;
-        // Keep authored DomeLight environment; otherwise disable IBL to avoid double-lighting.
-        // BUT: if DomeLight was detected but its texture failed to load, fall back to default lighting
-        // to avoid completely dark scenes (textures won't be visible without any lighting).
+        // If a DomeLight successfully loaded its texture, keep the environment for IBL.
+        // Otherwise, clear the environment to avoid any unintended ambient lighting.
         if (!hasUsdDomeLightRef.value) {
           scene.environment = null;
-          // Fallback: if DomeLight texture failed, enable default lights so textures are visible
-          hemisphereLight.visible = true;
-          defaultDir.visible = true;
-          hemisphereLight.intensity = 0.4;
-          defaultDir.intensity = 0.8;
-          scene.environment = defaultEnvTex;
-          scene.environmentIntensity = 0.2;
         }
       } else {
         // No authored lights: enable viewer defaults.

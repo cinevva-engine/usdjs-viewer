@@ -292,8 +292,13 @@ export function createMdlSourceAssetMaterial(opts: {
     const shaderPath = shader.path?.primPath ?? 'unknown';
     console.log('[MATERIALS:MDL] createMdlSourceAssetMaterial called for shader:', shaderPath);
 
-    // Placeholder material; we'll async-populate maps.
-    const mat = new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.9, metalness: 0.0 });
+    // Placeholder material with OmniPBR defaults (per NVIDIA docs):
+    // - diffuse_color_constant default: (0.2, 0.2, 0.2)
+    // - reflection_roughness_constant default: 0.5
+    // - metallic_constant default: 0.0
+    const DEFAULT_OMNIPBR_COLOR = 0x333333; // RGB(51,51,51) ≈ (0.2, 0.2, 0.2)
+    const mat = new THREE.MeshStandardMaterial({ color: DEFAULT_OMNIPBR_COLOR, roughness: 0.5, metalness: 0.0 });
+    console.log('[MATERIALS:MDL] Created material with default color:', mat.color.getHexString());
     mat.side = THREE.DoubleSide;
     mat.name = `MDL_${shaderPath}`;
     console.log('[MATERIALS:MDL] Created material instance:', mat.name, mat.uuid);
@@ -314,10 +319,13 @@ export function createMdlSourceAssetMaterial(opts: {
         });
 
         if (mdl.constants.diffuseColor) {
+            console.log('[MATERIALS:MDL] Applying diffuseColor constant:', mdl.constants.diffuseColor.getHexString());
             deferTextureApply(() => {
                 mat.color.copy(mdl.constants.diffuseColor!);
                 mat.needsUpdate = true;
             });
+        } else {
+            console.log('[MATERIALS:MDL] No diffuseColor constant found, keeping default:', mat.color.getHexString());
         }
 
         const loadTex = async (asset: string, cfg?: (t: THREE.Texture) => void): Promise<THREE.Texture | null> => {
@@ -419,12 +427,14 @@ export function createMdlSourceAssetMaterial(opts: {
         } else {
             // If no ORM, apply scalar constants if present.
             if (typeof mdl.constants.roughness === 'number') {
+                console.log('[MATERIALS:MDL] Applying roughness constant:', mdl.constants.roughness);
                 deferTextureApply(() => {
                     mat.roughness = THREE.MathUtils.clamp(mdl.constants.roughness!, 0, 1);
                     mat.needsUpdate = true;
                 });
             }
             if (typeof mdl.constants.metallic === 'number') {
+                console.log('[MATERIALS:MDL] Applying metallic constant:', mdl.constants.metallic);
                 deferTextureApply(() => {
                     mat.metalness = THREE.MathUtils.clamp(mdl.constants.metallic!, 0, 1);
                     mat.needsUpdate = true;
