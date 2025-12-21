@@ -119,7 +119,13 @@ export function createDomeEnvironmentController(opts: {
       // so we keep using the viewer calibration constant used for other nits-based lights.
       const USD_NITS_TO_THREE = 8000;
       scene.environmentIntensity = intensity / USD_NITS_TO_THREE;
-      scene.backgroundIntensity = scene.environmentIntensity;
+      // IMPORTANT: backgroundIntensity controls the visual brightness of the skybox/backdrop.
+      // Unlike environmentIntensity (which scales IBL contribution to object lighting),
+      // the background should NOT be dimmed by scene lighting calibration.
+      // Per USD DomeLight spec and Three.js design: the background is a backdrop, not an illuminated
+      // object. It should display at natural HDR brightness and let the tonemapper handle it.
+      // Setting to 1.0 means "display HDR as-is" before tonemapping.
+      scene.backgroundIntensity = 1.0;
       console.log('[DomeLight] Environment texture loaded successfully:', assetPath);
       onSuccess?.();
     };

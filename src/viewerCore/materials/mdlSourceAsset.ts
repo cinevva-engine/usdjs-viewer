@@ -116,6 +116,85 @@ async function fetchMdlText(mdlUrl: string, resolveAssetUrl?: (assetPath: string
     return await res.text();
 }
 
+/**
+ * Check if this looks like a built-in MDL material (e.g., OmniPBR.mdl, OmniGlass.mdl).
+ * Built-in materials are just filenames without paths.
+ */
+function isBuiltInMdl(mdlAsset: string): boolean {
+    // Built-in materials are typically just "Name.mdl" without any path separators or URLs
+    const isSimpleFilename = !mdlAsset.includes('/') && !mdlAsset.includes('\\') && !mdlAsset.includes(':');
+    const knownBuiltins = ['OmniPBR.mdl', 'OmniGlass.mdl', 'OmniSurface.mdl', 'OmniSurfaceBase.mdl', 'OmniEmissive.mdl', 'OmniHairBase.mdl'];
+    return isSimpleFilename || knownBuiltins.some(b => mdlAsset.endsWith(b));
+}
+
+/**
+ * For built-in MDL materials (like OmniPBR), read shader inputs directly from USD.
+ * OmniPBR uses inputs like:
+ *   - inputs:diffuse_color_constant (color)
+ *   - inputs:diffuse_texture (asset)
+ *   - inputs:reflection_roughness_constant (float)
+ *   - inputs:metallic_constant (float)
+ *   - inputs:normalmap_texture (asset)
+ *   - inputs:ORM_texture (asset)
+ */
+function resolveFromUsdShaderInputs(
+    shader: SdfPrimSpec,
+    mdlAsset: string,
+): MdlResolved {
+    console.log('[MATERIALS:MDL] Resolving built-in MDL from USD shader inputs:', mdlAsset);
+
+    const subId = getStringProp(shader, 'info:mdl:sourceAsset:subIdentifier');
+
+    // Read texture inputs using OmniPBR naming convention
+    const textures: MdlResolved['textures'] = {
+        baseColor: getAssetProp(shader, 'inputs:diffuse_texture') ?? undefined,
+        normal: getAssetProp(shader, 'inputs:normalmap_texture') ?? undefined,
+        orm: getAssetProp(shader, 'inputs:ORM_texture') ?? undefined,
+        roughness: getAssetProp(shader, 'inputs:reflectionroughness_texture') ?? undefined,
+        metallic: getAssetProp(shader, 'inputs:metallic_texture') ?? undefined,
+        emissive: getAssetProp(shader, 'inputs:emissive_mask_texture') ?? undefined,
+        opacity: getAssetProp(shader, 'inputs:opacity_texture') ?? undefined,
+    };
+
+    // Read constant values
+    const constants: MdlResolved['constants'] = {};
+
+    // diffuse_color_constant
+    const diffuseColorProp: any = shader.properties?.get('inputs:diffuse_color_constant')?.defaultValue;
+    if (diffuseColorProp) {
+        if (Array.isArray(diffuseColorProp) && diffuseColorProp.length >= 3) {
+            constants.diffuseColor = new THREE.Color(diffuseColorProp[0], diffuseColorProp[1], diffuseColorProp[2]);
+        } else if (diffuseColorProp.value && Array.isArray(diffuseColorProp.value) && diffuseColorProp.value.length >= 3) {
+            constants.diffuseColor = new THREE.Color(diffuseColorProp.value[0], diffuseColorProp.value[1], diffuseColorProp.value[2]);
+        }
+    }
+
+    // reflection_roughness_constant
+    const roughProp: any = shader.properties?.get('inputs:reflection_roughness_constant')?.defaultValue;
+    if (typeof roughProp === 'number') {
+        constants.roughness = roughProp;
+    } else if (roughProp && typeof roughProp.value === 'number') {
+        constants.roughness = roughProp.value;
+    }
+
+    // metallic_constant
+    const metalProp: any = shader.properties?.get('inputs:metallic_constant')?.defaultValue;
+    if (typeof metalProp === 'number') {
+        constants.metallic = metalProp;
+    } else if (metalProp && typeof metalProp.value === 'number') {
+        constants.metallic = metalProp.value;
+    }
+
+    console.log('[MATERIALS:MDL] Built-in MDL resolved from USD inputs:', { textures, constants });
+
+    return {
+        mdlUrl: mdlAsset,
+        subIdentifier: typeof subId === 'string' ? subId : null,
+        textures,
+        constants,
+    };
+}
+
 async function resolveMdlSourceAsset(
     shader: SdfPrimSpec,
     resolveAssetUrl?: (assetPath: string) => string | null,
@@ -130,9 +209,24 @@ async function resolveMdlSourceAsset(
     }
 
     const subId = getStringProp(shader, 'info:mdl:sourceAsset:subIdentifier');
-    console.log('[MATERIALS:MDL] Fetching MDL text from:', mdlAsset);
-    const mdlText = await fetchMdlText(mdlAsset, resolveAssetUrl);
-    console.log('[MATERIALS:MDL] MDL text fetched, length:', mdlText.length);
+
+    // Check if this is a built-in MDL material
+    if (isBuiltInMdl(mdlAsset)) {
+        console.log('[MATERIALS:MDL] Detected built-in MDL material:', mdlAsset);
+        return resolveFromUsdShaderInputs(shader, mdlAsset);
+    }
+
+    // Try to fetch the MDL file
+    let mdlText: string;
+    try {
+        console.log('[MATERIALS:MDL] Fetching MDL text from:', mdlAsset);
+        mdlText = await fetchMdlText(mdlAsset, resolveAssetUrl);
+        console.log('[MATERIALS:MDL] MDL text fetched, length:', mdlText.length);
+    } catch (err) {
+        // Fetch failed - fall back to reading USD shader inputs
+        console.warn('[MATERIALS:MDL] MDL fetch failed, falling back to USD shader inputs:', err);
+        return resolveFromUsdShaderInputs(shader, mdlAsset);
+    }
 
     const args = extractMdlTextureArgs(mdlText);
     const texCandidates = args.map((x) => resolveRelativeToMdlUrl(mdlAsset, x.path));
