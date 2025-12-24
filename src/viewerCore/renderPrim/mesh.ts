@@ -35,6 +35,33 @@ export function renderUsdMeshPrim(opts: {
     } = opts;
 
     if (USDDEBUG) dbg(`[Mesh] Rendering mesh: ${node.path}, prototypeRootForMaterials=${bindingRootForMaterials?.path?.primPath}`);
+
+    // USD-WG corpus: invalid/degenerate authored extents should result in empty imaging (usdrecord).
+    // In practice, some renderers use `extent` for culling and/or imaging bounds; if it's invalid
+    // (inverse order) or zero-sized, the prim may be treated as not renderable.
+    const extent = getPrimProp(node.prim, 'extent');
+    if (extent && typeof extent === 'object' && extent.type === 'array') {
+        const a0 = extent.value?.[0];
+        const a1 = extent.value?.[1];
+        const isTuple3 = (v: any): v is { type: 'tuple'; value: any[] } =>
+            !!v && typeof v === 'object' && v.type === 'tuple' && Array.isArray(v.value) && v.value.length >= 3;
+        if (isTuple3(a0) && isTuple3(a1)) {
+            const [minX, minY, minZ] = a0.value;
+            const [maxX, maxY, maxZ] = a1.value;
+            if (
+                typeof minX === 'number' && typeof minY === 'number' && typeof minZ === 'number' &&
+                typeof maxX === 'number' && typeof maxY === 'number' && typeof maxZ === 'number'
+            ) {
+                const inverse = (minX > maxX) || (minY > maxY) || (minZ > maxZ);
+                const zero = (minX === maxX) && (minY === maxY) && (minZ === maxZ);
+                if (inverse || zero) {
+                    if (USDDEBUG) dbg(`[Mesh] ${node.path}: skipping render due to invalid extent (inverse=${inverse}, zero=${zero})`);
+                    return;
+                }
+            }
+        }
+    }
+
     const mat = resolveMaterial(node.prim);
     applySidedness(node.prim, mat);
     // USD commonly binds materials via GeomSubsets (per-face material assignment). In that case, the Mesh itself

@@ -13,7 +13,7 @@ export function createRunPipeline(opts: {
   onStatus: (msg: string) => void;
   onTree: (nodes: PrimeTreeNode[], selectedPath: string | null) => void;
 
-  externalFiles: Map<string, { name: string; text: string }>;
+  externalFiles: Map<string, { name: string; text: string; binary?: ArrayBuffer }>;
   getEntryKey: () => string;
   getTextareaText: () => string;
   getCompose: () => boolean;
@@ -138,26 +138,58 @@ export function createRunPipeline(opts: {
 
       const entryKey = getEntryKey();
       const textareaText = getTextareaText();
-      const entryText = entryKey === '<textarea>' ? textareaText : externalFiles.get(entryKey)?.text ?? textareaText;
+      const entryFile = entryKey === '<textarea>'
+        ? { text: textareaText, binary: undefined }
+        : externalFiles.get(entryKey) ?? { text: textareaText, binary: undefined };
       const entryId = entryKey === '<textarea>' ? '<viewer>' : entryKey;
 
       let stage: UsdStage;
       try {
         const t0 = performance.now();
         perfMark(perf('stageOpen:start'));
-        stage =
-          entryKey === '<textarea>'
-            ? UsdStage.openUSDA(entryText, entryId)
-            : await UsdStage.openUSDAWithResolver(entryText, resolver, entryId);
+
+        // Check if entry file is binary (USDC/USDZ)
+        if (entryFile.binary) {
+          // Native binary loading - parse directly without conversion
+          const data = new Uint8Array(entryFile.binary);
+          const { isUsdzContent } = await import('@cinevva/usdjs');
+
+          if (isUsdzContent(data)) {
+            // USDZ file - use async parser
+            stage = await UsdStage.openUSDZ(data, entryId);
+          } else {
+            // USDC file - use sync parser
+            stage = UsdStage.open(data, entryId);
+          }
+        } else {
+          // Text file (USDA) - use existing text-based loading
+          const entryText = entryFile.text ?? textareaText;
+          stage =
+            entryKey === '<textarea>'
+              ? UsdStage.openUSDA(entryText, entryId)
+              : await UsdStage.openUSDAWithResolver(entryText, resolver, entryId);
+        }
+
         perfMark(perf('stageOpen:end'));
         perfMeasure(perf('stageOpen'), perf('stageOpen:start'), perf('stageOpen:end'));
-        dbg('stage open ok', { ms: +(performance.now() - t0).toFixed(1), entryId });
+        dbg('stage open ok', { ms: +(performance.now() - t0).toFixed(1), entryId, isBinary: !!entryFile.binary });
       } catch (err) {
         // If composition fails due to invalid external references, log and continue
         // This allows the scene to render even if some external assets are invalid
         console.warn('USD composition failed (some external references may be invalid):', err);
         // Fall back to non-composed stage
-        stage = UsdStage.openUSDA(entryText, entryId);
+        if (entryFile.binary) {
+          const data = new Uint8Array(entryFile.binary);
+          const { isUsdzContent } = await import('@cinevva/usdjs');
+          if (isUsdzContent(data)) {
+            stage = await UsdStage.openUSDZ(data, entryId);
+          } else {
+            stage = UsdStage.open(data, entryId);
+          }
+        } else {
+          const entryText = entryFile.text ?? textareaText;
+          stage = UsdStage.openUSDA(entryText, entryId);
+        }
       }
 
       // Use the entry layer identifier for relative asset resolution (textures, etc.).

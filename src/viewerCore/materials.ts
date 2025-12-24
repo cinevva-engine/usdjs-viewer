@@ -409,7 +409,9 @@ export function resolveUsdUvTextureInfo(
       ? fileDv
       : fileDv && typeof fileDv === 'object' && fileDv.type === 'asset' && typeof fileDv.value === 'string'
         ? fileDv.value
-        : null;
+        : fileDv && typeof fileDv === 'object' && fileDv.type === 'reference' && typeof fileDv.assetPath === 'string'
+          ? fileDv.assetPath
+          : null;
   const filePath =
     filePathRaw && fileDv && typeof fileDv === 'object' && typeof (fileDv as any).__fromIdentifier === 'string'
       ? (() => {

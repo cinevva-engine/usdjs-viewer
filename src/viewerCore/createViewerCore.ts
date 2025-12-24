@@ -49,6 +49,47 @@ function listPrimCount(root: any): number {
   return n;
 }
 
+function createAxisLabelSprite(opts: { text: string; color: string }): THREE.Sprite {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) {
+    const mat = new THREE.SpriteMaterial({ color: 0xffffff });
+    const sprite = new THREE.Sprite(mat);
+    sprite.center.set(0.5, 0.5);
+    sprite.scale.setScalar(0.2);
+    return sprite;
+  }
+
+  ctx.clearRect(0, 0, size, size);
+  ctx.font = 'bold 84px system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.lineWidth = 12;
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.65)';
+  ctx.strokeText(opts.text, size / 2, size / 2);
+  ctx.fillStyle = opts.color;
+  ctx.fillText(opts.text, size / 2, size / 2);
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+
+  const material = new THREE.SpriteMaterial({
+    map: texture,
+    transparent: true,
+    depthTest: false,
+    depthWrite: false,
+  });
+  const sprite = new THREE.Sprite(material);
+  sprite.center.set(0.5, 0.5);
+  // Base scale; will be adjusted dynamically each frame.
+  sprite.scale.setScalar(0.2);
+  return sprite;
+}
+
 export function createViewerCore(opts: {
   viewportEl: HTMLElement;
   onStatus: (msg: string) => void;
@@ -106,7 +147,7 @@ export function createViewerCore(opts: {
   const { normalizeCorpusPathForHash, normalizeCorpusPathForFetch, setCorpusHash, readCorpusHash } =
     createCorpusHashHelpers({ corpusPathPrefix: CORPUS_PATH_PREFIX, hashPrefixCorpus: HASH_PREFIX_CORPUS });
 
-  const externalFiles = new Map<string, { name: string; text: string }>();
+  const externalFiles = new Map<string, { name: string; text: string; binary?: ArrayBuffer }>();
   let textareaText = DEFAULT_USDA;
   let entryKey = '<textarea>';
   let compose = true;
@@ -202,6 +243,26 @@ export function createViewerCore(opts: {
   });
   scene.add(axesHelper);
 
+  // Axis labels (X/Y/Z) - small sprites at the ends of the axes.
+  // Keep these readable regardless of model overlap by disabling depthTest.
+  const axisLen = 20;
+  const labelOffset = 1.5;
+  const xLabel = createAxisLabelSprite({ text: 'X', color: '#ff4d4d' });
+  const yLabel = createAxisLabelSprite({ text: 'Y', color: '#4dff4d' });
+  const zLabel = createAxisLabelSprite({ text: 'Z', color: '#4d7dff' });
+  xLabel.position.set(axisLen + labelOffset, 0, 0);
+  yLabel.position.set(0, axisLen + labelOffset, 0);
+  zLabel.position.set(0, 0, axisLen + labelOffset);
+  xLabel.renderOrder = 3;
+  yLabel.renderOrder = 3;
+  zLabel.renderOrder = 3;
+  scene.add(xLabel, yLabel, zLabel);
+  const axisLabelSprites: Array<{ sprite: THREE.Sprite; dir: THREE.Vector3 }> = [
+    { sprite: xLabel, dir: new THREE.Vector3(1, 0, 0) },
+    { sprite: yLabel, dir: new THREE.Vector3(0, 1, 0) },
+    { sprite: zLabel, dir: new THREE.Vector3(0, 0, 1) },
+  ];
+
   // Default lights: kept low since RoomEnvironment IBL provides ambient fill.
   // These add subtle directionality without over-lighting the scene.
   const hemisphereLight = new THREE.HemisphereLight(0xffffff, 0x222222, 0.2);
@@ -236,6 +297,28 @@ export function createViewerCore(opts: {
   let raf = 0;
   function renderLoop(timestamp: number) {
     controls.update();
+    // Keep the axes + labels near the current orbit focus.
+    axesHelper.position.copy(controls.target);
+
+    // Keep axis label sprites at a consistent on-screen size (in pixels).
+    if (axisLabelSprites.length) {
+      // Anchor labels on the same origin as the axes helper.
+      const origin = axesHelper.position;
+      const viewportH = Math.max(1, renderer.domElement.clientHeight || opts.viewportEl.clientHeight || 1);
+      const fovRad = THREE.MathUtils.degToRad(camera.fov);
+      const desiredPx = 20; // 2x bigger
+
+      for (const { sprite, dir } of axisLabelSprites) {
+        const tMax = axisLen + labelOffset;
+        sprite.position.copy(origin.clone().addScaledVector(dir, tMax));
+
+        // Keep constant on-screen size: compute world scale from pixel size + camera FOV + distance.
+        const distToCam = camera.position.distanceTo(sprite.position);
+        const worldHeightAtDist = 2 * distToCam * Math.tan(fovRad * 0.5);
+        const worldSize = (desiredPx * worldHeightAtDist) / viewportH;
+        sprite.scale.setScalar(worldSize);
+      }
+    }
 
     ({ animationCurrentTime, lastAnimationFrameTime } = advanceAnimationPlayback({
       timestamp,
@@ -435,6 +518,14 @@ export function createViewerCore(opts: {
     pmremGen.dispose();
     renderer.dispose();
     renderer.domElement.remove();
+
+    // Dispose axis label sprites (CanvasTexture + SpriteMaterial)
+    for (const { sprite: spr } of axisLabelSprites) {
+      scene.remove(spr);
+      const mat = spr.material as THREE.SpriteMaterial;
+      mat.map?.dispose();
+      mat.dispose();
+    }
   }
 
   return {

@@ -161,6 +161,24 @@ export function createGetReferenceImageUrl(opts: {
       return null;
     }
 
+    // Handle NVIDIA Omniverse scene templates corpus
+    const NVIDIA_PREFIX = 'test/corpus/external/nvidia-omniverse-scene-templates/';
+    if (relPath.startsWith(NVIDIA_PREFIX)) {
+      // NVIDIA templates include thumbnails next to the USD in `.thumbs/256x256/`,
+      // with a filename that keeps the USD extension (e.g. `scene.usd.png`).
+      const lastSlash = relPath.lastIndexOf('/');
+      if (lastSlash === -1) return null;
+      const dir = relPath.slice(0, lastSlash);
+      const fileNameWithUsdExt = relPath.slice(lastSlash + 1); // e.g. clean_cloudy_sky_and_floor.usd
+
+      // Prefer .png; fall back to other image extensions if present.
+      for (const ext of extensions) {
+        const refImageRel = `${dir}/.thumbs/256x256/${fileNameWithUsdExt}${ext}`;
+        return `/__usdjs_corpus?file=${encodeURIComponent(refImageRel)}`;
+      }
+      return null;
+    }
+
     return null;
   };
 }

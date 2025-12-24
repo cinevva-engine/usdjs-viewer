@@ -8,6 +8,28 @@ import https from 'node:https';
 import http from 'node:http';
 import { createHash } from 'node:crypto';
 
+// Feature flag: Use usdcat as fallback for binary USD conversion
+// Can be controlled via:
+// 1. Environment variable: USE_USDCAT_FALLBACK=false
+// 2. URL parameter: ?usdcat_fallback=false (overrides env var)
+// Defaults to true (usdcat fallback enabled)
+function getUseUsdcatFallback(req?: any): boolean {
+    // Check URL parameter first (client-side control)
+    if (req?.url) {
+        try {
+            const url = new URL(req.url, 'http://localhost');
+            const param = url.searchParams.get('usdcat_fallback');
+            if (param !== null) {
+                return param !== 'false' && param !== '0';
+            }
+        } catch {
+            // Ignore URL parsing errors
+        }
+    }
+    // Fall back to environment variable
+    return process.env.USE_USDCAT_FALLBACK !== 'false';
+}
+
 const viewerRoot = path.dirname(fileURLToPath(import.meta.url));
 const usdjsRoot = path.resolve(viewerRoot, '../usdjs');
 const cacheDir = path.join(viewerRoot, '.cache', 'usd-conversions');
@@ -93,15 +115,121 @@ function setCachedConversion(cacheKey: string, usda: string): void {
     }
 }
 
-// Convert USD to USDA using usdcat with caching
-async function convertUsdToUsda(filePath: string, cacheKey: string): Promise<string> {
+// Convert external USD file to USDA using usdcat (helper for proxy endpoint)
+async function convertExternalUsdToUsda(tmpFile: string, cacheKey: string, res: any): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+        const usdcat = spawn('usdcat', [tmpFile], { stdio: ['ignore', 'pipe', 'pipe'] });
+        let stdout = '';
+        let stderr = '';
+
+        usdcat.stdout.on('data', (chunk) => {
+            stdout += chunk.toString();
+        });
+
+        usdcat.stderr.on('data', (chunk) => {
+            stderr += chunk.toString();
+        });
+
+        usdcat.on('close', (code) => {
+            // Clean up temp file
+            try {
+                fs.unlinkSync(tmpFile);
+            } catch { }
+
+            if (code === 0 && stdout) {
+                // Cache the result
+                setCachedConversion(cacheKey, stdout);
+                res.setHeader('content-type', 'text/plain; charset=utf-8');
+                res.end(stdout);
+                resolve();
+            } else {
+                res.statusCode = 500;
+                res.setHeader('content-type', 'text/plain; charset=utf-8');
+                res.end(`usdcat failed (exit ${code}): ${stderr || 'unknown error'}`);
+                reject(new Error(`usdcat failed: ${stderr}`));
+            }
+        });
+
+        usdcat.on('error', (err) => {
+            try {
+                fs.unlinkSync(tmpFile);
+            } catch { }
+            res.statusCode = 500;
+            res.setHeader('content-type', 'text/plain; charset=utf-8');
+            res.end(`usdcat spawn error: ${err.message}`);
+            reject(err);
+        });
+    });
+}
+
+// Convert binary USD to USDA using our parser (primary) or usdcat (fallback)
+async function convertUsdToUsda(filePath: string, cacheKey: string, useUsdcatFallback: boolean = true): Promise<string> {
     // Check cache first
     const cached = getCachedConversion(cacheKey);
     if (cached) {
         return cached;
     }
 
-    // Perform conversion
+    // Try parsing with our USDC/USDZ parser first (primary method)
+    try {
+        const buffer = fs.readFileSync(filePath);
+        const data = new Uint8Array(buffer);
+
+        // Check if it's USDC or USDZ
+        const isUsdc = data.length >= 8 &&
+            data[0] === 0x50 && data[1] === 0x58 && data[2] === 0x52 && data[3] === 0x2D &&
+            data[4] === 0x55 && data[5] === 0x53 && data[6] === 0x44 && data[7] === 0x43;
+
+        const isUsdz = data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B;
+
+        if (isUsdc || isUsdz) {
+            // Parse using our parser to validate
+            const { parseUsdcToLayer, parseUsdzToLayer, isUsdcContent, isUsdzContent } = await import('@cinevva/usdjs');
+
+            if (isUsdc) {
+                // Validate USDC parsing works
+                parseUsdcToLayer(data, { identifier: filePath });
+            } else if (isUsdz) {
+                // Validate USDZ parsing works
+                await parseUsdzToLayer(data, { identifier: filePath });
+            }
+
+            // If parsing succeeds, use usdcat to convert to USDA text
+            // (We don't have a USDA serializer yet, so we use usdcat for the conversion)
+            // This validates the file with our parser but uses usdcat for output
+            if (useUsdcatFallback) {
+                return await convertUsdToUsdaWithUsdcat(filePath, cacheKey);
+            } else {
+                throw new Error('USDC/USDZ parser validation passed but USDA serialization not yet implemented. Enable usdcat_fallback URL parameter for conversion.');
+            }
+        }
+    } catch (parseErr: any) {
+        // If our parser fails, fall back to usdcat if enabled
+        if (useUsdcatFallback) {
+            console.warn(`USDC/USDZ parser failed for ${filePath}, falling back to usdcat:`, parseErr.message);
+            return await convertUsdToUsdaWithUsdcat(filePath, cacheKey);
+        } else {
+            throw new Error(`USDC/USDZ parser failed: ${parseErr.message}`);
+        }
+    }
+
+    // If not binary USD, fall back to usdcat
+    if (useUsdcatFallback) {
+        return await convertUsdToUsdaWithUsdcat(filePath, cacheKey);
+    } else {
+        throw new Error('File is not binary USD format and usdcat fallback is disabled');
+    }
+}
+
+// Convert USD to USDA using usdcat (fallback method)
+async function convertUsdToUsdaWithUsdcat(filePath: string, cacheKey: string): Promise<string> {
+    // Check cache first
+    const cached = getCachedConversion(cacheKey);
+    if (cached) {
+        return cached;
+    }
+
+    // Perform conversion using usdcat
     return new Promise<string>((resolve, reject) => {
         const usdcat = spawn('usdcat', [filePath], { stdio: ['ignore', 'pipe', 'pipe'] });
         let stdout = '';
@@ -147,6 +275,9 @@ export default defineConfig({
 
                 server.middlewares.use('/__usdjs_corpus', async (req, res) => {
                     try {
+                        // Check URL parameter for usdcat fallback control
+                        const useUsdcatFallback = getUseUsdcatFallback(req);
+
                         const looksLikeUsdc = (absPath: string): boolean => {
                             // `.usd` files can be either ASCII USDA or binary USDC.
                             // Binary USDC files start with the magic bytes `PXR-USDC`.
@@ -195,20 +326,80 @@ export default defineConfig({
                         const isOtherText = ext === '.txt' || ext === '.json';
                         const isMaterialX = ext === '.mtlx';
 
-                        // Convert binary USD files (.usdc/.usdz) to USDA text using usdcat with caching
+                        // Serve binary USD files (.usdc/.usdz) as binary - let client parse natively
                         if (isBinaryUsd) {
                             try {
-                                const cacheKey = getLocalFileCacheKey(abs);
-                                const usda = await convertUsdToUsda(abs, cacheKey);
-                                res.setHeader('content-type', 'text/plain; charset=utf-8');
-                                res.statusCode = 200;
-                                res.end(usda);
+                                // Validate with our parser first (but don't convert to text)
+                                const buffer = fs.readFileSync(abs);
+                                const data = new Uint8Array(buffer);
+
+                                const isUsdc = data.length >= 8 &&
+                                    data[0] === 0x50 && data[1] === 0x58 && data[2] === 0x52 && data[3] === 0x2D &&
+                                    data[4] === 0x55 && data[5] === 0x53 && data[6] === 0x44 && data[7] === 0x43;
+
+                                const isUsdz = data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B;
+
+                                if (isUsdc || isUsdz) {
+                                    // Validate parsing works (but don't convert)
+                                    const { parseUsdcToLayer, parseUsdzToLayer } = await import('@cinevva/usdjs');
+                                    if (isUsdc) {
+                                        parseUsdcToLayer(data, { identifier: abs });
+                                    } else {
+                                        await parseUsdzToLayer(data, { identifier: abs });
+                                    }
+                                    // Check if URL parameter forces text conversion via usdcat
+                                    if (useUsdcatFallback) {
+                                        // User requested usdcat fallback - convert to text even though parser succeeded
+                                        const cacheKey = getLocalFileCacheKey(abs);
+                                        const usda = await convertUsdToUsdaWithUsdcat(abs, cacheKey);
+                                        res.setHeader('content-type', 'text/plain; charset=utf-8');
+                                        res.statusCode = 200;
+                                        res.end(usda);
+                                        return;
+                                    } else {
+                                        // Parser validation passed - serve as binary for native loading
+                                        res.setHeader('content-type', isUsdz ? 'model/vnd.usdz+zip' : 'application/x-usdc');
+                                        res.setHeader('x-usd-format', isUsdz ? 'usdz' : 'usdc');
+                                        res.statusCode = 200;
+                                        res.end(buffer);
+                                        return;
+                                    }
+                                }
+
+                                // If not USDC/USDZ but marked as binary, fall back to conversion
+                                if (useUsdcatFallback) {
+                                    const cacheKey = getLocalFileCacheKey(abs);
+                                    const usda = await convertUsdToUsdaWithUsdcat(abs, cacheKey);
+                                    res.setHeader('content-type', 'text/plain; charset=utf-8');
+                                    res.statusCode = 200;
+                                    res.end(usda);
+                                    return;
+                                } else {
+                                    throw new Error('Binary USD file format not recognized');
+                                }
                             } catch (err) {
-                                res.statusCode = 500;
-                                res.setHeader('content-type', 'text/plain; charset=utf-8');
-                                res.end(`Conversion error: ${(err as any)?.message || err}`);
+                                // If parser validation fails, fall back to conversion if enabled
+                                if (useUsdcatFallback) {
+                                    try {
+                                        const cacheKey = getLocalFileCacheKey(abs);
+                                        const usda = await convertUsdToUsdaWithUsdcat(abs, cacheKey);
+                                        res.setHeader('content-type', 'text/plain; charset=utf-8');
+                                        res.statusCode = 200;
+                                        res.end(usda);
+                                        return;
+                                    } catch (convertErr) {
+                                        res.statusCode = 500;
+                                        res.setHeader('content-type', 'text/plain; charset=utf-8');
+                                        res.end(`Conversion error: ${(convertErr as any)?.message || convertErr}`);
+                                        return;
+                                    }
+                                } else {
+                                    res.statusCode = 500;
+                                    res.setHeader('content-type', 'text/plain; charset=utf-8');
+                                    res.end(`Parser error: ${(err as any)?.message || err}`);
+                                    return;
+                                }
                             }
-                            return;
                         }
 
                         // MaterialX files (.mtlx) - XML-based material files
@@ -257,6 +448,9 @@ export default defineConfig({
                 // Proxy endpoint for external resources (avoids CORS issues)
                 server.middlewares.use('/__usdjs_proxy', async (req, res) => {
                     try {
+                        // Check URL parameter for usdcat fallback control
+                        const useUsdcatFallback = getUseUsdcatFallback(req);
+
                         const u = new URL(req.url ?? '', 'http://localhost');
                         const targetUrl = u.searchParams.get('url');
                         if (!targetUrl) {
@@ -275,19 +469,19 @@ export default defineConfig({
                         // Check if this is a USD file that might need conversion
                         const urlLower = targetUrl.toLowerCase();
                         const isUsdFile = urlLower.endsWith('.usd') || urlLower.endsWith('.usdc') || urlLower.endsWith('.usdz');
-                        
+
                         // Fetch the external resource server-side
                         const urlObj = new URL(targetUrl);
                         const client = urlObj.protocol === 'https:' ? https : http;
-                        
+
                         const proxyReq = client.get(targetUrl, async (proxyRes) => {
                             // Forward status code
                             res.statusCode = proxyRes.statusCode ?? 200;
-                            
+
                             // Set CORS headers to allow browser access
                             res.setHeader('access-control-allow-origin', '*');
                             res.setHeader('access-control-allow-methods', 'GET');
-                            
+
                             if (proxyRes.statusCode && proxyRes.statusCode >= 200 && proxyRes.statusCode < 300) {
                                 // For USD files, we need to check if they're binary and convert them
                                 if (isUsdFile) {
@@ -296,28 +490,28 @@ export default defineConfig({
                                     proxyRes.on('data', (chunk: Buffer) => {
                                         chunks.push(chunk);
                                     });
-                                    
+
                                     proxyRes.on('end', async () => {
                                         const buffer = Buffer.concat(chunks);
                                         const contentType = proxyRes.headers['content-type'] || '';
-                                        
+
                                         // Check if it's binary: content-type indicates binary OR first bytes are binary
-                                        const isBinary = contentType.includes('application/octet-stream') || 
-                                                       urlLower.endsWith('.usdc') || 
-                                                       urlLower.endsWith('.usdz') ||
-                                                       (buffer.length > 0 && (buffer[0] === 0x50 && buffer[1] === 0x58 && buffer[2] === 0x52)); // PXR magic bytes
-                                        
+                                        const isBinary = contentType.includes('application/octet-stream') ||
+                                            urlLower.endsWith('.usdc') ||
+                                            urlLower.endsWith('.usdz') ||
+                                            (buffer.length > 0 && (buffer[0] === 0x50 && buffer[1] === 0x58 && buffer[2] === 0x52)); // PXR magic bytes
+
                                         // Also check if it doesn't start with #usda (text format)
                                         const textStart = buffer.subarray(0, Math.min(100, buffer.length)).toString('utf8');
                                         const looksLikeText = textStart.trim().startsWith('#usda') || textStart.trim().startsWith('#USD');
-                                        
+
                                         if (isBinary || !looksLikeText) {
-                                            // Convert binary USD to USDA text using usdcat with caching
+                                            // Convert binary USD to USDA text using our parser (primary) or usdcat (fallback)
                                             // Generate cache key from URL and response headers
                                             const etag = proxyRes.headers['etag'];
                                             const lastModified = proxyRes.headers['last-modified'];
                                             const cacheKey = getExternalUrlCacheKey(targetUrl, etag, lastModified);
-                                            
+
                                             // Check cache first
                                             const cached = getCachedConversion(cacheKey);
                                             if (cached) {
@@ -325,68 +519,67 @@ export default defineConfig({
                                                 res.end(cached);
                                                 return;
                                             }
-                                            
-                                            // Write buffer to temp file, then use usdcat
+
+                                            // Write buffer to temp file, then convert
                                             const tmpDir = path.join(viewerRoot, '.tmp');
                                             if (!fs.existsSync(tmpDir)) {
                                                 fs.mkdirSync(tmpDir, { recursive: true });
                                             }
                                             const tmpFile = path.join(tmpDir, `proxy_${Date.now()}_${Math.random().toString(36).substring(7)}.usdc`);
-                                            
+
                                             try {
                                                 fs.writeFileSync(tmpFile, buffer);
-                                                
-                                                await new Promise<void>((resolve, reject) => {
-                                                    const usdcat = spawn('usdcat', [tmpFile], { stdio: ['ignore', 'pipe', 'pipe'] });
-                                                    let stdout = '';
-                                                    let stderr = '';
-                                                    
-                                                    usdcat.stdout.on('data', (chunk) => {
-                                                        stdout += chunk.toString();
-                                                    });
-                                                    
-                                                    usdcat.stderr.on('data', (chunk) => {
-                                                        stderr += chunk.toString();
-                                                    });
-                                                    
-                                                    usdcat.on('close', (code) => {
-                                                        // Clean up temp file
-                                                        try {
-                                                            fs.unlinkSync(tmpFile);
-                                                        } catch {}
-                                                        
-                                                        if (code === 0 && stdout) {
-                                                            // Cache the result
-                                                            setCachedConversion(cacheKey, stdout);
-                                                            res.setHeader('content-type', 'text/plain; charset=utf-8');
-                                                            res.end(stdout);
-                                                            resolve();
+
+                                                // Try parsing with our parser first
+                                                try {
+                                                    const data = new Uint8Array(buffer);
+                                                    const isUsdc = data.length >= 8 &&
+                                                        data[0] === 0x50 && data[1] === 0x58 && data[2] === 0x52 && data[3] === 0x2D &&
+                                                        data[4] === 0x55 && data[5] === 0x53 && data[6] === 0x44 && data[7] === 0x43;
+
+                                                    const isUsdz = data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B;
+
+                                                    if (isUsdc || isUsdz) {
+                                                        // Validate with our parser
+                                                        const { parseUsdcToLayer, parseUsdzToLayer } = await import('@cinevva/usdjs');
+                                                        if (isUsdc) {
+                                                            parseUsdcToLayer(data, { identifier: targetUrl });
                                                         } else {
-                                                            res.statusCode = 500;
-                                                            res.setHeader('content-type', 'text/plain; charset=utf-8');
-                                                            res.end(`usdcat failed (exit ${code}): ${stderr || 'unknown error'}`);
-                                                            reject(new Error(`usdcat failed: ${stderr}`));
+                                                            await parseUsdzToLayer(data, { identifier: targetUrl });
                                                         }
-                                                    });
-                                                    
-                                                    usdcat.on('error', (err) => {
-                                                        try {
-                                                            fs.unlinkSync(tmpFile);
-                                                        } catch {}
-                                                        res.statusCode = 500;
-                                                        res.setHeader('content-type', 'text/plain; charset=utf-8');
-                                                        res.end(`usdcat spawn error: ${err.message}`);
-                                                        reject(err);
-                                                    });
-                                                });
+                                                        // Parser validation passed - use usdcat for conversion if enabled
+                                                        if (useUsdcatFallback) {
+                                                            await convertExternalUsdToUsda(tmpFile, cacheKey, res);
+                                                        } else {
+                                                            throw new Error('USDC/USDZ parser validation passed but USDA serialization not yet implemented. Add ?usdcat_fallback=true to URL to enable conversion.');
+                                                        }
+                                                    } else {
+                                                        // Not binary USD, use usdcat if enabled
+                                                        if (useUsdcatFallback) {
+                                                            await convertExternalUsdToUsda(tmpFile, cacheKey, res);
+                                                        } else {
+                                                            throw new Error('File is not binary USD format and usdcat fallback is disabled. Add ?usdcat_fallback=true to URL.');
+                                                        }
+                                                    }
+                                                } catch (parseErr: any) {
+                                                    // If our parser fails, fall back to usdcat if enabled
+                                                    if (useUsdcatFallback) {
+                                                        console.warn(`USDC/USDZ parser failed for ${targetUrl}, falling back to usdcat:`, parseErr.message);
+                                                        await convertExternalUsdToUsda(tmpFile, cacheKey, res);
+                                                    } else {
+                                                        throw parseErr;
+                                                    }
+                                                }
                                             } catch (convertErr) {
                                                 try {
                                                     fs.unlinkSync(tmpFile);
-                                                } catch {}
+                                                } catch { }
                                                 res.statusCode = 500;
                                                 res.setHeader('content-type', 'text/plain; charset=utf-8');
                                                 res.end(`Conversion error: ${(convertErr as any)?.message || convertErr}`);
+                                                return;
                                             }
+                                            return;
                                         } else {
                                             // It's already text USDA, send as-is
                                             res.setHeader('content-type', 'text/plain; charset=utf-8');
@@ -415,7 +608,7 @@ export default defineConfig({
                                 });
                             }
                         });
-                        
+
                         proxyReq.on('error', (err) => {
                             if (!res.headersSent) {
                                 res.statusCode = 502;
@@ -423,7 +616,7 @@ export default defineConfig({
                                 res.end(`Proxy error: ${err.message}`);
                             }
                         });
-                        
+
                         proxyReq.setTimeout(30000, () => {
                             proxyReq.destroy();
                             if (!res.headersSent) {

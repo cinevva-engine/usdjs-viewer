@@ -5,7 +5,7 @@ export type TextResolver = {
 };
 
 export function createTextResolver(opts: {
-    externalFiles: Map<string, { name: string; text: string }>;
+    externalFiles: Map<string, { name: string; text: string; binary?: ArrayBuffer }>;
     dbg: (...args: any[]) => void;
 }): TextResolver {
     const { externalFiles, dbg } = opts;
@@ -125,6 +125,18 @@ export function createTextResolver(opts: {
             // Try exact matches for both raw and `[corpus]`-prefixed keys.
             const exact = externalFiles.get(resolved) ?? externalFiles.get(`[corpus]${resolved}`);
             if (exact) {
+                // If it's a binary file, we need to convert it for the text resolver
+                // (composition still expects text format for referenced layers)
+                if (exact.binary) {
+                    // For binary files in composition, we still need text
+                    // This is a limitation - composition expects text format
+                    // In the future, we could update the resolver to support binary layers
+                    console.warn(`Binary file ${resolved} referenced in composition - conversion may be needed`);
+                    // Return empty layer for now (composition will skip it)
+                    const out = { identifier: resolved, text: '#usda 1.0\n' };
+                    textCache.set(resolved, out);
+                    return out;
+                }
                 const out = { identifier: resolved, text: exact.text };
                 textCache.set(resolved, out);
                 return out;
@@ -132,6 +144,13 @@ export function createTextResolver(opts: {
             for (const [k, v] of externalFiles.entries()) {
                 // Be tolerant of corpus prefix and varying absolute-ish identifiers.
                 if (k.endsWith('/' + resolved) || k.endsWith(resolved) || k.endsWith(`/[corpus]${resolved}`) || k.endsWith(`[corpus]${resolved}`)) {
+                    // Handle binary files in composition
+                    if (v.binary) {
+                        console.warn(`Binary file ${resolved} referenced in composition - conversion may be needed`);
+                        const out = { identifier: resolved, text: '#usda 1.0\n' };
+                        textCache.set(resolved, out);
+                        return out;
+                    }
                     const out = { identifier: resolved, text: v.text };
                     textCache.set(resolved, out);
                     return out;
