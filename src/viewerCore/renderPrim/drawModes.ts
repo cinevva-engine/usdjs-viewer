@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import type { SdfPrimSpec } from '@cinevva/usdjs';
 
 import { getPrimProp } from '../usdAnim';
+import { extractToken } from '../materials/valueExtraction';
 
 export function applyUsdGeomModelApiDrawMode(opts: {
     container: THREE.Object3D;
@@ -19,13 +20,7 @@ export function applyUsdGeomModelApiDrawMode(opts: {
     // - model:drawMode = "bounds"  -> wireframe bbox
     // - model:drawMode = "origin"  -> axes at model origin
     // - model:drawMode = "cards"   -> simple card planes (cross/box) using model:cardGeometry
-    const drawModeVal = getPrimProp(prim, 'model:drawMode');
-    const drawMode =
-        typeof drawModeVal === 'string'
-            ? drawModeVal
-            : drawModeVal && typeof drawModeVal === 'object' && (drawModeVal as any).type === 'token'
-                ? (drawModeVal as any).value
-                : null;
+    const drawMode = extractToken(getPrimProp(prim, 'model:drawMode'));
 
     if (drawMode && drawMode !== 'default' && drawMode !== 'inherited' && drawMode !== 'none') {
         // Don't apply to PointInstancer prototype rendering; those nodes re-use renderPrim() internally.
@@ -79,13 +74,7 @@ export function applyUsdGeomModelApiDrawMode(opts: {
                     const axes = new THREE.AxesHelper(len);
                     proxy.add(axes);
                 } else if (drawMode === 'cards') {
-                    const cardGeomVal = getPrimProp(prim, 'model:cardGeometry');
-                    const cardGeometry =
-                        typeof cardGeomVal === 'string'
-                            ? cardGeomVal
-                            : cardGeomVal && typeof cardGeomVal === 'object' && (cardGeomVal as any).type === 'token'
-                                ? (cardGeomVal as any).value
-                                : 'cross';
+                    const cardGeometry = extractToken(getPrimProp(prim, 'model:cardGeometry')) ?? 'cross';
 
                     const mat = new THREE.MeshBasicMaterial({
                         color: 0x66ccff,

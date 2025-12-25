@@ -13,8 +13,17 @@ export function applyUsdTransform2dToTexture(tex: THREE.Texture, transform2d: Sd
     // build the UV transform matrix explicitly.
     const readFloat2 = (name: string): [number, number] | null => {
         const dv: any = transform2d.properties?.get(name)?.defaultValue;
-        if (!dv || typeof dv !== 'object' || dv.type !== 'tuple') return null;
-        const [x, y] = dv.value ?? [];
+        if (!dv) return null;
+
+        // Common representations:
+        // - USDA: `{ type: 'tuple', value: [x,y] }` or `{ type: 'vec2f', value: [x,y] }`
+        // - USDC: packed typed arrays are possible (rare for single float2, but be defensive)
+        const src =
+            dv && typeof dv === 'object' && (dv.type === 'tuple' || dv.type === 'vec2f') ? (dv as any).value : dv;
+
+        if (!src || typeof (src as any).length !== 'number' || (src as any).length < 2) return null;
+        const x = (src as any)[0];
+        const y = (src as any)[1];
         if (typeof x !== 'number' || typeof y !== 'number') return null;
         return [x, y];
     };

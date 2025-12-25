@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { deferTextureApply, getOrLoadTextureClone } from '../textureCache';
+import { extractToken, extractColor3f, extractFloat, extractAssetPath as extractAssetPathUtil } from './valueExtraction';
 
 type MdlResolved = {
     mdlUrl: string;
@@ -30,10 +31,9 @@ function stripCorpusPrefix(v: string): string {
 }
 
 function getStringProp(shader: SdfPrimSpec, name: string): string | null {
-    const dv: any = shader.properties?.get(name)?.defaultValue;
-    if (typeof dv === 'string') return stripCorpusPrefix(dv);
-    if (dv && typeof dv === 'object' && dv.type === 'token' && typeof dv.value === 'string') return dv.value;
-    return null;
+    const dv = shader.properties?.get(name)?.defaultValue;
+    const token = extractToken(dv);
+    return token ? stripCorpusPrefix(token) : null;
 }
 
 function getAssetProp(shader: SdfPrimSpec, name: string): string | null {
@@ -156,34 +156,20 @@ function resolveFromUsdShaderInputs(
         opacity: getAssetProp(shader, 'inputs:opacity_texture') ?? undefined,
     };
 
-    // Read constant values
+    // Read constant values using utility functions
     const constants: MdlResolved['constants'] = {};
 
     // diffuse_color_constant
-    const diffuseColorProp: any = shader.properties?.get('inputs:diffuse_color_constant')?.defaultValue;
-    if (diffuseColorProp) {
-        if (Array.isArray(diffuseColorProp) && diffuseColorProp.length >= 3) {
-            constants.diffuseColor = new THREE.Color(diffuseColorProp[0], diffuseColorProp[1], diffuseColorProp[2]);
-        } else if (diffuseColorProp.value && Array.isArray(diffuseColorProp.value) && diffuseColorProp.value.length >= 3) {
-            constants.diffuseColor = new THREE.Color(diffuseColorProp.value[0], diffuseColorProp.value[1], diffuseColorProp.value[2]);
-        }
-    }
+    const diffuseColor = extractColor3f(shader.properties?.get('inputs:diffuse_color_constant')?.defaultValue);
+    if (diffuseColor) constants.diffuseColor = diffuseColor;
 
     // reflection_roughness_constant
-    const roughProp: any = shader.properties?.get('inputs:reflection_roughness_constant')?.defaultValue;
-    if (typeof roughProp === 'number') {
-        constants.roughness = roughProp;
-    } else if (roughProp && typeof roughProp.value === 'number') {
-        constants.roughness = roughProp.value;
-    }
+    const roughness = extractFloat(shader.properties?.get('inputs:reflection_roughness_constant')?.defaultValue);
+    if (roughness !== undefined) constants.roughness = roughness;
 
     // metallic_constant
-    const metalProp: any = shader.properties?.get('inputs:metallic_constant')?.defaultValue;
-    if (typeof metalProp === 'number') {
-        constants.metallic = metalProp;
-    } else if (metalProp && typeof metalProp.value === 'number') {
-        constants.metallic = metalProp.value;
-    }
+    const metallic = extractFloat(shader.properties?.get('inputs:metallic_constant')?.defaultValue);
+    if (metallic !== undefined) constants.metallic = metallic;
 
     console.log('[MATERIALS:MDL] Built-in MDL resolved from USD inputs:', { textures, constants });
 

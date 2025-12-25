@@ -3,6 +3,7 @@ import { LoopSubdivision } from 'three-subdivide';
 import type { SdfPrimSpec } from '@cinevva/usdjs';
 import { getPrimProp } from '../usdAnim';
 import { getPropMetadataString, parseNumberArray, parsePoint3ArrayToFloat32, parseTuple2ArrayToFloat32, parseTuple3ArrayToFloat32 } from '../usdParse';
+import { extractToken } from '../materials/valueExtraction';
 
 import { computeSmoothNormalsDeindexed } from './normals';
 import { flipGeometryWinding } from './winding';
@@ -18,22 +19,12 @@ export function buildUsdMeshGeometry(prim: SdfPrimSpec, unitScale = 1.0): THREE.
     // - rightHanded (default): counter-clockwise winding when viewed from front
     // - leftHanded: clockwise winding when viewed from front
     // Three.js uses counter-clockwise for front faces, so leftHanded meshes need winding flipped
-    const orientationProp = getPrimProp(prim, 'orientation');
-    const orientation = typeof orientationProp === 'object' && orientationProp?.type === 'token'
-        ? orientationProp.value
-        : typeof orientationProp === 'string'
-            ? orientationProp
-            : 'rightHanded'; // USD default
+    const orientation = extractToken(getPrimProp(prim, 'orientation')) ?? 'rightHanded';
     const isLeftHanded = orientation === 'leftHanded';
 
     // USD subdivision surface support
     // Check for subdivisionScheme (catmullClark, loop, bilinear, none)
-    const subdivisionSchemeProp = getPrimProp(prim, 'subdivisionScheme');
-    const subdivisionScheme = typeof subdivisionSchemeProp === 'object' && subdivisionSchemeProp?.type === 'token'
-        ? subdivisionSchemeProp.value
-        : typeof subdivisionSchemeProp === 'string'
-            ? subdivisionSchemeProp
-            : null;
+    const subdivisionScheme = extractToken(getPrimProp(prim, 'subdivisionScheme'));
 
     // refinementLevel determines how many subdivision iterations to apply
     const refinementLevelProp = getPrimProp(prim, 'refinementLevel');

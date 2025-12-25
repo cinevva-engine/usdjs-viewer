@@ -95,11 +95,12 @@ export function createTextResolver(opts: {
                                 return { identifier: resolved, text: '#usda 1.0\n' };
                             }
 
-                            // Try a quick parse to catch syntax errors early
+                            // Validate by parsing the *full* text (parsing a truncated prefix is very likely
+                            // to fail with "got eof" on otherwise-valid files).
                             try {
                                 // Import parseUsdaToLayer dynamically to avoid circular deps
                                 const { parseUsdaToLayer } = await import('@cinevva/usdjs');
-                                parseUsdaToLayer(text.substring(0, Math.min(1000, text.length)), { identifier: resolved });
+                                parseUsdaToLayer(text, { identifier: resolved });
                             } catch (parseErr: any) {
                                 // If quick parse fails, the full parse will likely fail too
                                 console.warn(`Skipping external reference (parse validation failed): ${resolved}`, parseErr?.message || parseErr);

@@ -2,10 +2,29 @@ import type { SdfPrimSpec, SdfValue } from '@cinevva/usdjs';
 
 export function sdfToNumberTuple(v: SdfValue | undefined, n: number): number[] | null {
     if (!v || typeof v !== 'object') return null;
-    if (v.type === 'tuple') {
-        const arr = v.value.map((x) => (typeof x === 'number' ? x : 0));
-        return arr.length === n ? arr : null;
+    // USD values can arrive in multiple representations depending on parser + authored type:
+    // - `{ type: 'tuple', value: number[] }` (common)
+    // - `{ type: 'vec2f'|'vec3f'|'vec4f', value: number[] }` (common for xform ops in USDA)
+    // - `{ type: 'typedArray', value: Float32Array/Float64Array/... }` (packed USDC)
+    const t = (v as any).type;
+    const raw = (v as any).value;
+
+    // Typed arrays
+    if (t === 'typedArray' && raw && typeof raw.length === 'number') {
+        if (raw.length !== n) return null;
+        const out = new Array<number>(n);
+        for (let i = 0; i < n; i++) out[i] = typeof raw[i] === 'number' ? raw[i] : 0;
+        return out;
     }
+
+    // tuple / vec*f
+    if (t === 'tuple' || (typeof t === 'string' && t.startsWith('vec'))) {
+        if (!raw || typeof raw.length !== 'number' || raw.length !== n) return null;
+        const out = new Array<number>(n);
+        for (let i = 0; i < n; i++) out[i] = typeof raw[i] === 'number' ? raw[i] : 0;
+        return out;
+    }
+
     return null;
 }
 

@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import type { SdfPrimSpec, SdfValue } from '@cinevva/usdjs';
 import { getPrimProp, getPrimPropAtTime, propHasAnimation, sdfToNumberTuple } from './usdAnim';
+import { extractToken } from './materials/valueExtraction';
 
 /**
  * Parse USD matrix4d[] array into THREE.Matrix4 array.
@@ -132,8 +133,8 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         if (!dv || typeof dv !== 'object' || dv.type !== 'array' || !Array.isArray(dv.value)) return [];
         const out: string[] = [];
         for (const el of dv.value) {
-            if (typeof el === 'string') out.push(el);
-            else if (el && typeof el === 'object' && el.type === 'token' && typeof el.value === 'string') out.push(el.value);
+            const token = extractToken(el);
+            if (token) out.push(token);
         }
         return out;
     };
@@ -201,35 +202,28 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         if (opName.startsWith('xformOp:rotateXYZ')) {
             const v = vec3For(opName);
             if (!v) return null;
-            // USD uses row-vector convention (v' = v * M). For rotations, converting to Three.js
-            // column-vector convention effectively transposes the matrix, which for pure rotations
-            // is the inverse: reverse order + negate angles.
-            //
-            // USD rotateXYZ (X then Y then Z in row-vector) becomes:
-            //   M_three = Rz(-z) * Ry(-y) * Rx(-x)
-            // which matches Three's Euler order 'ZYX' with negated angles.
             const e = new THREE.Euler(
-                THREE.MathUtils.degToRad(-v[0]),
-                THREE.MathUtils.degToRad(-v[1]),
-                THREE.MathUtils.degToRad(-v[2]),
-                'ZYX'
+                THREE.MathUtils.degToRad(v[0]),
+                THREE.MathUtils.degToRad(v[1]),
+                THREE.MathUtils.degToRad(v[2]),
+                'XYZ'
             );
             return new THREE.Matrix4().makeRotationFromEuler(e);
         }
         if (opName.startsWith('xformOp:rotateX')) {
             const d = scalarFor(opName);
             if (d === null) return null;
-            return new THREE.Matrix4().makeRotationX(THREE.MathUtils.degToRad(-d));
+            return new THREE.Matrix4().makeRotationX(THREE.MathUtils.degToRad(d));
         }
         if (opName.startsWith('xformOp:rotateY')) {
             const d = scalarFor(opName);
             if (d === null) return null;
-            return new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(-d));
+            return new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(d));
         }
         if (opName.startsWith('xformOp:rotateZ')) {
             const d = scalarFor(opName);
             if (d === null) return null;
-            return new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(-d));
+            return new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(d));
         }
 
         return null;
@@ -339,28 +333,26 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         // Keep rotation semantics consistent with the non-matrix path (matrixForOp),
         // which already matches usd-wg-assets for simple_transform.
         // We build the Three.js (column-vector) rotation matrix, then transpose to USD rows.
-        const mCol = new THREE.Matrix4().makeRotationX(THREE.MathUtils.degToRad(-deg));
+        const mCol = new THREE.Matrix4().makeRotationX(THREE.MathUtils.degToRad(deg));
         return threeMatrixToUsdRows(mCol);
     };
 
     const usdRotateYRows = (deg: number): UsdRows4 => {
-        const mCol = new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(-deg));
+        const mCol = new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(deg));
         return threeMatrixToUsdRows(mCol);
     };
 
     const usdRotateZRows = (deg: number): UsdRows4 => {
-        const mCol = new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(-deg));
+        const mCol = new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(deg));
         return threeMatrixToUsdRows(mCol);
     };
 
     const usdRotateXYZRows = (degX: number, degY: number, degZ: number): UsdRows4 => {
-        // Match the mapping we use elsewhere for rotateXYZ when targeting Three.js:
-        // `rotateXYZ(x,y,z)` -> Euler('ZYX', -x, -y, -z)
         const e = new THREE.Euler(
-            THREE.MathUtils.degToRad(-degX),
-            THREE.MathUtils.degToRad(-degY),
-            THREE.MathUtils.degToRad(-degZ),
-            'ZYX',
+            THREE.MathUtils.degToRad(degX),
+            THREE.MathUtils.degToRad(degY),
+            THREE.MathUtils.degToRad(degZ),
+            'XYZ',
         );
         const mCol = new THREE.Matrix4().makeRotationFromEuler(e);
         return threeMatrixToUsdRows(mCol);
@@ -441,12 +433,11 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         if (t) obj.position.set(t[0] * unitScale, t[1] * unitScale, t[2] * unitScale);
         if (s) obj.scale.set(s[0], s[1], s[2]);
         if (r) {
-            // See matrixForOp rotateXYZ for rationale: reverse order + negate angles for Three.js.
             obj.rotation.set(
-                THREE.MathUtils.degToRad(-r[0]),
-                THREE.MathUtils.degToRad(-r[1]),
-                THREE.MathUtils.degToRad(-r[2]),
-                'ZYX'
+                THREE.MathUtils.degToRad(r[0]),
+                THREE.MathUtils.degToRad(r[1]),
+                THREE.MathUtils.degToRad(r[2]),
+                'XYZ'
             );
         }
         obj.updateMatrix();
@@ -538,10 +529,10 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
     const rXYZ = vec3For(rName);
     if (rXYZ) {
         obj.rotation.set(
-            THREE.MathUtils.degToRad(-rXYZ[0]),
-            THREE.MathUtils.degToRad(-rXYZ[1]),
-            THREE.MathUtils.degToRad(-rXYZ[2]),
-            'ZYX'
+            THREE.MathUtils.degToRad(rXYZ[0]),
+            THREE.MathUtils.degToRad(rXYZ[1]),
+            THREE.MathUtils.degToRad(rXYZ[2]),
+            'XYZ'
         );
         obj.updateMatrix();
         return;
@@ -555,7 +546,7 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
     let anyRot = false;
     const applyAxis = (axis: THREE.Vector3, degrees: number) => {
         const qq = new THREE.Quaternion();
-        qq.setFromAxisAngle(axis, THREE.MathUtils.degToRad(-degrees));
+        qq.setFromAxisAngle(axis, THREE.MathUtils.degToRad(degrees));
         q.multiply(qq);
         anyRot = true;
     };
@@ -576,10 +567,10 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
             const vv = vec3For(opName);
             if (vv) {
                 const e = new THREE.Euler(
-                    THREE.MathUtils.degToRad(-vv[0]),
-                    THREE.MathUtils.degToRad(-vv[1]),
-                    THREE.MathUtils.degToRad(-vv[2]),
-                    'ZYX'
+                    THREE.MathUtils.degToRad(vv[0]),
+                    THREE.MathUtils.degToRad(vv[1]),
+                    THREE.MathUtils.degToRad(vv[2]),
+                    'XYZ'
                 );
                 const qq = new THREE.Quaternion().setFromEuler(e);
                 q.multiply(qq);

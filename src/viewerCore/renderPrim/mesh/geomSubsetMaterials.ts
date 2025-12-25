@@ -4,6 +4,7 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 import { getPrimProp } from '../../usdAnim';
 import { parseNumberArray } from '../../usdParse';
 import { resolveMaterialBinding } from '../../materials';
+import { extractToken } from '../../materials/valueExtraction';
 
 export function applyGeomSubsetMaterials(opts: {
     meshPrim: SdfPrimSpec;
@@ -31,8 +32,7 @@ export function applyGeomSubsetMaterials(opts: {
     const picked: SubsetInfo[] = [];
     for (const s of subsets) {
         // elementType should be "face"
-        const et: any = getPrimProp(s, 'elementType');
-        const etVal = typeof et === 'string' ? et : (et && typeof et === 'object' && et.type === 'token' ? et.value : null);
+        const etVal = extractToken(getPrimProp(s, 'elementType'));
         if (etVal && etVal !== 'face') continue;
 
         const idx = parseNumberArray(getPrimProp(s, 'indices'));

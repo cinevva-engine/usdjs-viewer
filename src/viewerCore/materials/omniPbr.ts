@@ -1,97 +1,48 @@
 import * as THREE from 'three';
-import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
+import { type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { alphaToGreenAlphaMap } from './textureUtils';
 import { deferTextureApply, getOrLoadTextureClone } from '../textureCache';
+import { createPropertyGetters, type AssetInfo } from './valueExtraction';
 
 const isExr = (url: string) => /\.exr(\?|#|$)/i.test(url);
 
 export function extractOmniPbrInputs(shader: SdfPrimSpec): {
     diffuseColor?: THREE.Color;
-    diffuseTexture?: string;
+    diffuseTexture?: AssetInfo;
     diffuseTint?: THREE.Color;
     roughness?: number;
     specularLevel?: number;
     emissiveColor?: THREE.Color;
-    emissiveColorTexture?: string;
+    emissiveColorTexture?: AssetInfo;
     emissiveIntensity?: number;
     enableEmission?: boolean;
     enableOpacity?: boolean;
     opacityConstant?: number;
     enableOpacityTexture?: boolean;
-    opacityTexture?: string;
+    opacityTexture?: AssetInfo;
     opacityThreshold?: number;
     opacityMode?: number;
 } {
-    const result: any = {};
+    const { getColor3f, getFloat, getBool, getAssetPath } = createPropertyGetters(shader);
 
-    const getAssetPath = (name: string): string | undefined => {
-        const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
-        const prop = shader.properties?.get(name);
-        const dv: any = prop?.defaultValue;
-        // Some layers serialize asset paths as plain strings; support both.
-        if (typeof dv === 'string') return stripCorpusPrefix(dv);
-        if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') {
-            const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
-            const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
-            const normVal = stripCorpusPrefix(dv.value);
-            return normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
-        }
-        // usdjs may parse `@path@`-style authored values as a 'reference' SdfValue (with extra metadata fields).
-        // OmniPBR MDL inputs frequently use this encoding.
-        if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') {
-            const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
-            const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
-            const normVal = stripCorpusPrefix(dv.assetPath);
-            return normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
-        }
-        return undefined;
+    return {
+        diffuseColor: getColor3f('inputs:diffuse_color_constant'),
+        diffuseTexture: getAssetPath('inputs:diffuse_texture'),
+        diffuseTint: getColor3f('inputs:diffuse_tint'),
+        roughness: getFloat('inputs:reflection_roughness_constant'),
+        specularLevel: getFloat('inputs:specular_level'),
+        emissiveColor: getColor3f('inputs:emissive_color'),
+        emissiveColorTexture: getAssetPath('inputs:emissive_color_texture'),
+        emissiveIntensity: getFloat('inputs:emissive_intensity'),
+        enableEmission: getBool('inputs:enable_emission'),
+        enableOpacity: getBool('inputs:enable_opacity'),
+        opacityConstant: getFloat('inputs:opacity_constant'),
+        enableOpacityTexture: getBool('inputs:enable_opacity_texture'),
+        opacityTexture: getAssetPath('inputs:opacity_texture'),
+        opacityThreshold: getFloat('inputs:opacity_threshold'),
+        opacityMode: getFloat('inputs:opacity_mode'),
     };
-
-    const getColor3f = (name: string): THREE.Color | undefined => {
-        const prop = shader.properties?.get(name);
-        const dv: any = prop?.defaultValue;
-        if (!dv || typeof dv !== 'object' || dv.type !== 'tuple') return undefined;
-        const tuple = dv.value;
-        if (tuple.length >= 3 && typeof tuple[0] === 'number' && typeof tuple[1] === 'number' && typeof tuple[2] === 'number') {
-            return new THREE.Color(tuple[0], tuple[1], tuple[2]);
-        }
-        return undefined;
-    };
-
-    const getFloat = (name: string): number | undefined => {
-        const prop = shader.properties?.get(name);
-        const dv: any = prop?.defaultValue;
-        if (typeof dv === 'number') return dv;
-        return undefined;
-    };
-
-    const getBool = (name: string): boolean | undefined => {
-        const prop = shader.properties?.get(name);
-        const dv: any = prop?.defaultValue;
-        if (typeof dv === 'boolean') return dv;
-        if (typeof dv === 'number') return dv !== 0;
-        return undefined;
-    };
-
-    result.diffuseColor = getColor3f('inputs:diffuse_color_constant');
-    result.diffuseTexture = getAssetPath('inputs:diffuse_texture');
-    result.diffuseTint = getColor3f('inputs:diffuse_tint');
-    result.roughness = getFloat('inputs:reflection_roughness_constant');
-    result.specularLevel = getFloat('inputs:specular_level');
-    result.emissiveColor = getColor3f('inputs:emissive_color');
-    result.emissiveColorTexture = getAssetPath('inputs:emissive_color_texture');
-    result.emissiveIntensity = getFloat('inputs:emissive_intensity');
-    result.enableEmission = getBool('inputs:enable_emission');
-
-    result.enableOpacity = getBool('inputs:enable_opacity');
-    result.opacityConstant = getFloat('inputs:opacity_constant');
-    result.enableOpacityTexture = getBool('inputs:enable_opacity_texture');
-    result.opacityTexture = getAssetPath('inputs:opacity_texture');
-    result.opacityThreshold = getFloat('inputs:opacity_threshold');
-    result.opacityMode = getFloat('inputs:opacity_mode');
-
-    return result;
 }
 
 export function createOmniPbrMaterial(opts: {
@@ -117,22 +68,7 @@ export function createOmniPbrMaterial(opts: {
 
     // Albedo map (the "multiply texture" samples use a diffuse texture and a tint multiplier)
     if (inputs.diffuseTexture && resolveAssetUrl) {
-        const url = resolveAssetUrl(inputs.diffuseTexture);
-        // Debug: OmniPBR texture resolution
-        try {
-            const q = new URLSearchParams((window as any)?.location?.search ?? '');
-            const USDDEBUG = q.get('usddebug') === '1' || (window as any)?.localStorage?.getItem?.('usddebug') === '1';
-            if (USDDEBUG) {
-                // eslint-disable-next-line no-console
-                console.log('[usdjs-viewer][OmniPBR] diffuse_texture', {
-                    shader: shader.path?.primPath,
-                    asset: inputs.diffuseTexture,
-                    url,
-                });
-            }
-        } catch {
-            // ignore
-        }
+        const url = resolveAssetUrl(inputs.diffuseTexture.path, inputs.diffuseTexture.fromIdentifier ?? undefined);
         if (url) {
             void getOrLoadTextureClone(url, (tex) => {
                 tex.colorSpace = isExr(url) ? THREE.LinearSRGBColorSpace : THREE.SRGBColorSpace;
@@ -159,21 +95,7 @@ export function createOmniPbrMaterial(opts: {
         else mat.emissive.setHex(0xffffff);
 
         if (inputs.emissiveColorTexture && resolveAssetUrl) {
-            const url = resolveAssetUrl(inputs.emissiveColorTexture);
-            try {
-                const q = new URLSearchParams((window as any)?.location?.search ?? '');
-                const USDDEBUG = q.get('usddebug') === '1' || (window as any)?.localStorage?.getItem?.('usddebug') === '1';
-                if (USDDEBUG) {
-                    // eslint-disable-next-line no-console
-                    console.log('[usdjs-viewer][OmniPBR] emissive_color_texture', {
-                        shader: shader.path?.primPath,
-                        asset: inputs.emissiveColorTexture,
-                        url,
-                    });
-                }
-            } catch {
-                // ignore
-            }
+            const url = resolveAssetUrl(inputs.emissiveColorTexture.path, inputs.emissiveColorTexture.fromIdentifier ?? undefined);
             if (url) {
                 void getOrLoadTextureClone(url, (tex) => {
                     tex.colorSpace = isExr(url) ? THREE.LinearSRGBColorSpace : THREE.SRGBColorSpace;
@@ -213,7 +135,7 @@ export function createOmniPbrMaterial(opts: {
     if (inputs.enableOpacity && inputs.enableOpacityTexture && inputs.opacityTexture && resolveAssetUrl) {
         const thr = inputs.opacityThreshold ?? 0;
         if (thr > 0) {
-            const url = resolveAssetUrl(inputs.opacityTexture);
+            const url = resolveAssetUrl(inputs.opacityTexture.path, inputs.opacityTexture.fromIdentifier ?? undefined);
             if (url) {
                 void getOrLoadTextureClone(url, (tex) => {
                     // Opacity map should be treated as data, not color-managed.

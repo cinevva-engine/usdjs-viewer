@@ -8,6 +8,7 @@ import {
   applyWrapMode,
   cloneTexturePreserveParams,
 } from './materials/textureUtils';
+import { extractColor3f, extractToken } from './materials/valueExtraction';
 
 export { alphaToGreenAlphaMap, applyUsdTransform2dToTexture, applyWrapMode, cloneTexturePreserveParams } from './materials/textureUtils';
 export { createOmniPbrMaterial, extractOmniPbrInputs } from './materials/omniPbr';
@@ -375,7 +376,8 @@ export function resolveConnectedPrimWithOutput(
 export function resolveUsdPrimvarReaderFloat3(root: SdfPrimSpec, shader: SdfPrimSpec, inputName: string): { varname: string } | null {
   const conn = resolveConnectedPrimWithOutput(root, shader, inputName);
   if (!conn) return null;
-  const id = conn.prim.properties?.get('info:id')?.defaultValue;
+  const idDv = conn.prim.properties?.get('info:id')?.defaultValue;
+  const id = extractToken(idDv) ?? (typeof idDv === 'string' ? idDv : undefined);
   if (id !== 'UsdPrimvarReader_float3') return null;
   const v = conn.prim.properties?.get('inputs:varname')?.defaultValue;
   if (typeof v !== 'string' || !v) return null;
@@ -399,7 +401,8 @@ export function resolveUsdUvTextureInfo(
   scaleRaw?: [number, number, number];
   biasRaw?: [number, number, number];
 } | null {
-  const infoId = texShader.properties?.get('info:id')?.defaultValue;
+  const infoIdDv = texShader.properties?.get('info:id')?.defaultValue;
+  const infoId = extractToken(infoIdDv) ?? (typeof infoIdDv === 'string' ? infoIdDv : undefined);
   if (infoId !== 'UsdUVTexture') return null;
 
   const fileDv: any = texShader.properties?.get('inputs:file')?.defaultValue;
@@ -421,14 +424,24 @@ export function resolveUsdUvTextureInfo(
       : filePathRaw;
   if (!filePath) return null;
 
-  const wrapS = texShader.properties?.get('inputs:wrapS')?.defaultValue;
-  const wrapT = texShader.properties?.get('inputs:wrapT')?.defaultValue;
-  const sourceColorSpace = texShader.properties?.get('inputs:sourceColorSpace')?.defaultValue;
+  const wrapSDv = texShader.properties?.get('inputs:wrapS')?.defaultValue;
+  const wrapTDv = texShader.properties?.get('inputs:wrapT')?.defaultValue;
+  const sourceColorSpaceDv = texShader.properties?.get('inputs:sourceColorSpace')?.defaultValue;
+
+  const wrapS = extractToken(wrapSDv) ?? (typeof wrapSDv === 'string' ? wrapSDv : undefined);
+  const wrapT = extractToken(wrapTDv) ?? (typeof wrapTDv === 'string' ? wrapTDv : undefined);
+  const sourceColorSpace =
+    extractToken(sourceColorSpaceDv) ?? (typeof sourceColorSpaceDv === 'string' ? sourceColorSpaceDv : undefined);
 
   const readFloat4 = (name: string): [number, number, number] | undefined => {
     const dv: any = texShader.properties?.get(name)?.defaultValue;
-    if (!dv || typeof dv !== 'object' || dv.type !== 'tuple') return undefined;
-    const [r, g, b] = dv.value ?? [];
+    if (!dv || typeof dv !== 'object') return undefined;
+    // USDA can represent float4 as `tuple` or `vec4f` depending on parser/authoring.
+    // USDC packed values can also arrive as typed arrays.
+    if (dv.type !== 'tuple' && dv.type !== 'vec4f') return undefined;
+    const v: any = dv.value;
+    if (!v || typeof v.length !== 'number' || v.length < 3) return undefined;
+    const r = v[0], g = v[1], b = v[2];
     if (typeof r !== 'number' || typeof g !== 'number' || typeof b !== 'number') return undefined;
     return [r, g, b];
   };
@@ -441,14 +454,15 @@ export function resolveUsdUvTextureInfo(
 
   // If `inputs:st` connects to a UsdTransform2d, we can at least apply scale/offset/rotation.
   const stSource = resolveConnectedPrim(root, texShader, 'inputs:st');
-  const stInfoId = stSource?.properties?.get('info:id')?.defaultValue;
+  const stInfoIdDv = stSource?.properties?.get('info:id')?.defaultValue;
+  const stInfoId = extractToken(stInfoIdDv) ?? (typeof stInfoIdDv === 'string' ? stInfoIdDv : undefined);
   const transform2d = stInfoId === 'UsdTransform2d' ? stSource : null;
 
   return {
     file: filePath,
-    wrapS: typeof wrapS === 'string' ? wrapS : undefined,
-    wrapT: typeof wrapT === 'string' ? wrapT : undefined,
-    sourceColorSpace: typeof sourceColorSpace === 'string' ? sourceColorSpace : undefined,
+    wrapS,
+    wrapT,
+    sourceColorSpace,
     transform2d,
     scaleRgb,
     biasRgb,
@@ -484,14 +498,9 @@ export function extractShaderInputs(shader: SdfPrimSpec, materialPrim?: SdfPrimS
         const connectedInputName = targetPath.substring(lastDot + 1);
         // Look up the input on the material prim
         if (materialPrim) {
-          const matProp = materialPrim.properties?.get(connectedInputName);
-          const matDv: any = matProp?.defaultValue;
-          if (matDv && typeof matDv === 'object' && matDv.type === 'tuple') {
-            const tuple = matDv.value;
-            if (tuple.length >= 3 && typeof tuple[0] === 'number' && typeof tuple[1] === 'number' && typeof tuple[2] === 'number') {
-              return new THREE.Color(tuple[0], tuple[1], tuple[2]);
-            }
-          }
+          const matDv = materialPrim.properties?.get(connectedInputName)?.defaultValue;
+          const color = extractColor3f(matDv);
+          if (color) return color;
         }
       }
     }
@@ -518,17 +527,11 @@ export function extractShaderInputs(shader: SdfPrimSpec, materialPrim?: SdfPrimS
   };
 
   const getColor3f = (name: string): THREE.Color | undefined => {
-    const prop = shader.properties?.get(name);
-    const dv: any = prop?.defaultValue;
-    if (!dv || typeof dv !== 'object' || dv.type !== 'tuple') {
-      // Try connected value
-      return resolveConnectedColor3f(name);
-    }
-    const tuple = dv.value;
-    if (tuple.length >= 3 && typeof tuple[0] === 'number' && typeof tuple[1] === 'number' && typeof tuple[2] === 'number') {
-      return new THREE.Color(tuple[0], tuple[1], tuple[2]);
-    }
-    return undefined;
+    const dv = shader.properties?.get(name)?.defaultValue;
+    const color = extractColor3f(dv);
+    if (color) return color;
+    // Try connected value
+    return resolveConnectedColor3f(name);
   };
 
   const getFloat = (name: string): number | undefined => {
@@ -557,8 +560,7 @@ export function createMaterialFromShader(
   resolveAssetUrl?: (assetPath: string) => string | null,
   materialPrim?: SdfPrimSpec,
 ): THREE.Material {
-  const infoId = shader.properties?.get('info:id');
-  const shaderType = infoId?.defaultValue;
+  const shaderType = extractToken(shader.properties?.get('info:id')?.defaultValue);
 
   // Handle both UsdPreviewSurface and MaterialX's ND_UsdPreviewSurface_surfaceshader
   const isUsdPreviewSurface = shaderType === 'UsdPreviewSurface' || shaderType === 'ND_UsdPreviewSurface_surfaceshader';
@@ -582,41 +584,25 @@ export function createMaterialFromShader(
     return createStandardSurfaceMaterial({ shader, root, resolveAssetUrl, materialPrim });
   }
 
-  const mdlSubIdProp = shader.properties?.get('info:mdl:sourceAsset:subIdentifier');
-  const mdlSubId = mdlSubIdProp?.defaultValue;
-  if (typeof mdlSubId === 'string' && mdlSubId === 'OmniPBR') {
+  const mdlSubId = extractToken(shader.properties?.get('info:mdl:sourceAsset:subIdentifier')?.defaultValue);
+  if (mdlSubId === 'OmniPBR') {
     return createOmniPbrMaterial({ shader, resolveAssetUrl });
   }
 
   // Generic MDL `sourceAsset` (Omniverse content uses this for many library materials).
   // We can't execute MDL directly in WebGL, but we can often extract referenced textures and build a PBR approximation.
-  const implProp = shader.properties?.get('info:implementationSource');
-  const implDv: any = implProp?.defaultValue;
-  // Extract string value from token type (usdjs parses tokens as { type: 'token', value: string })
-  const impl = typeof implDv === 'string' ? implDv : (implDv && typeof implDv === 'object' && implDv.type === 'token' ? implDv.value : null);
-  const mdlSourceProp = shader.properties?.get('info:mdl:sourceAsset');
-  const mdlSourceDv: any = mdlSourceProp?.defaultValue;
+  const impl = extractToken(shader.properties?.get('info:implementationSource')?.defaultValue);
+  const mdlSourceDv: any = shader.properties?.get('info:mdl:sourceAsset')?.defaultValue;
+  // Asset values can be { type: 'asset', value: string } or plain strings
   const mdlSource = typeof mdlSourceDv === 'string' ? mdlSourceDv : (mdlSourceDv && typeof mdlSourceDv === 'object' && mdlSourceDv.type === 'asset' ? mdlSourceDv.value : null);
   const isMdlSourceAsset = impl === 'sourceAsset' && typeof mdlSource === 'string' && mdlSource.length > 0;
 
-  // Log material detection attempts
-  console.log('[MATERIALS] createMaterialFromShader:', {
-    shaderPath: shader.path?.primPath,
-    shaderType,
-    implProp: implProp ? { defaultValue: implDv, extracted: impl } : null,
-    mdlSourceProp: mdlSourceProp ? { defaultValue: mdlSourceDv, extracted: mdlSource } : null,
-    isMdlSourceAsset,
-    isUsdPreviewSurface,
-    isStandardSurface,
-    mdlSubId,
-  });
-
   if (isMdlSourceAsset) {
-    console.log('[MATERIALS] Creating MDL sourceAsset material for:', shader.path?.primPath, 'MDL:', mdlSource);
+    dbg('Creating MDL sourceAsset material for:', shader.path?.primPath, 'MDL:', mdlSource);
     return createMdlSourceAssetMaterial({ shader, resolveAssetUrl: resolveAssetUrl as any });
   }
 
-  console.log('[MATERIALS] Falling back to default gray material for:', shader.path?.primPath);
+  dbg('Falling back to default gray material for:', shader.path?.primPath);
   return new THREE.MeshStandardMaterial({ color: 0x888888, roughness: 0.8 });
 }
 

@@ -4,6 +4,7 @@ import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 import { getPrimProp } from '../usdAnim';
 import { resolveMaterialBinding, resolveShaderFromMaterial } from '../materials';
 import { getMdlEnvironmentAsset } from '../materials/mdlSourceAsset';
+import { extractToken } from '../materials/valueExtraction';
 
 export function renderUsdLightPrim(opts: {
   typeName: string;
@@ -312,12 +313,7 @@ export function renderUsdLightPrim(opts: {
           })()
           : null;
       const fmtVal = getPrimProp(prim, 'inputs:texture:format') ?? getPrimProp(prim, 'texture:format');
-      const fmt =
-        typeof fmtVal === 'string'
-          ? fmtVal
-          : fmtVal && typeof fmtVal === 'object' && (fmtVal as any).type === 'token'
-            ? ((fmtVal as any).value as string)
-            : null;
+      const fmt = extractToken(fmtVal);
 
       const isProbablyFileUrl = (u: string): boolean => {
         try {

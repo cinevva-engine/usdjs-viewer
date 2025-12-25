@@ -3,6 +3,7 @@ import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
 import { findPrimByPath } from '../usdPaths';
 import { deferTextureApply, getOrLoadTextureClone } from '../textureCache';
+import { extractColor3f, extractToken } from './valueExtraction';
 
 const isExr = (url: string) => /\.exr(\?|#|$)/i.test(url);
 
@@ -96,12 +97,8 @@ export function extractStandardSurfaceInputs(
                 if (materialPrim) {
                     const matProp = materialPrim.properties?.get(connectedInputName);
                     const matDv: any = matProp?.defaultValue;
-                    if (matDv && typeof matDv === 'object' && matDv.type === 'tuple') {
-                        const tuple = matDv.value;
-                        if (tuple.length >= 3 && typeof tuple[0] === 'number' && typeof tuple[1] === 'number' && typeof tuple[2] === 'number') {
-                            return new THREE.Color(tuple[0], tuple[1], tuple[2]);
-                        }
-                    }
+                    const matColor = extractColor3f(matDv);
+                    if (matColor) return matColor;
                 }
                 // Second, try resolving from NodeGraph constant color nodes
                 if (root) {
@@ -120,32 +117,22 @@ export function extractStandardSurfaceInputs(
                                     const innerPrim = findPrimByPath(root, innerPrimPath);
                                     if (innerPrim) {
                                         // Check if it's a constant color node (ND_constant_color3 or similar)
-                                        const infoId = innerPrim.properties?.get('info:id')?.defaultValue;
-                                        if (typeof infoId === 'string' && infoId.includes('constant')) {
-                                            const valueProp = innerPrim.properties?.get('inputs:value');
-                                            const valueDv: any = valueProp?.defaultValue;
-                                            if (valueDv && typeof valueDv === 'object' && valueDv.type === 'tuple') {
-                                                const tuple = valueDv.value;
-                                                if (tuple.length >= 3 && typeof tuple[0] === 'number' && typeof tuple[1] === 'number' && typeof tuple[2] === 'number') {
-                                                    return new THREE.Color(tuple[0], tuple[1], tuple[2]);
-                                                }
-                                            }
+                                        const infoIdVal = extractToken(innerPrim.properties?.get('info:id')?.defaultValue);
+                                        if (infoIdVal && infoIdVal.includes('constant')) {
+                                            const valueDv = innerPrim.properties?.get('inputs:value')?.defaultValue;
+                                            const valueColor = extractColor3f(valueDv);
+                                            if (valueColor) return valueColor;
                                         }
                                     }
                                 }
                             }
                         }
                         // Check if this is a constant color shader directly
-                        const infoId = prim.properties?.get('info:id')?.defaultValue;
-                        if (typeof infoId === 'string' && infoId.includes('constant')) {
-                            const valueProp = prim.properties?.get('inputs:value');
-                            const valueDv: any = valueProp?.defaultValue;
-                            if (valueDv && typeof valueDv === 'object' && valueDv.type === 'tuple') {
-                                const tuple = valueDv.value;
-                                if (tuple.length >= 3 && typeof tuple[0] === 'number' && typeof tuple[1] === 'number' && typeof tuple[2] === 'number') {
-                                    return new THREE.Color(tuple[0], tuple[1], tuple[2]);
-                                }
-                            }
+                        const primInfoId = extractToken(prim.properties?.get('info:id')?.defaultValue);
+                        if (primInfoId && primInfoId.includes('constant')) {
+                            const primValueDv = prim.properties?.get('inputs:value')?.defaultValue;
+                            const primValueColor = extractColor3f(primValueDv);
+                            if (primValueColor) return primValueColor;
                         }
                     }
                 }
@@ -260,22 +247,9 @@ export function extractStandardSurfaceInputs(
     };
 
     const getColor3f = (name: string): THREE.Color | undefined => {
-        const prop = shader.properties?.get(name);
-        const dv: any = prop?.defaultValue;
-        if (!dv || typeof dv !== 'object') {
-            return resolveConnectedColor3f(name);
-        }
-        // Handle tuple type (used for color3f values)
-        if (dv.type === 'tuple' || dv.type === 'vec3f') {
-            const tuple = dv.value;
-            if (Array.isArray(tuple) && tuple.length >= 3 && typeof tuple[0] === 'number' && typeof tuple[1] === 'number' && typeof tuple[2] === 'number') {
-                return new THREE.Color(tuple[0], tuple[1], tuple[2]);
-            }
-        }
-        // Handle raw array format (some USD files might use this)
-        if (Array.isArray(dv) && dv.length >= 3 && typeof dv[0] === 'number' && typeof dv[1] === 'number' && typeof dv[2] === 'number') {
-            return new THREE.Color(dv[0], dv[1], dv[2]);
-        }
+        const dv = shader.properties?.get(name)?.defaultValue;
+        const color = extractColor3f(dv);
+        if (color) return color;
         return resolveConnectedColor3f(name);
     };
 

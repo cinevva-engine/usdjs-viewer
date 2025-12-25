@@ -1,4 +1,5 @@
 import type { SdfValue } from '@cinevva/usdjs';
+import { extractToken } from './materials/valueExtraction';
 
 export type NumberArrayLike = ArrayLike<number> & Iterable<number>;
 
@@ -59,7 +60,12 @@ export function parseTuple3ArrayToFloat32(v: SdfValue | undefined): Float32Array
     if ((v as any).type === 'typedArray') {
         const elType = (v as any).elementType;
         const data = (v as any).value;
-        if (elType && String(elType).endsWith('3f') && data instanceof Float32Array) return data.slice();
+        // Packed arrays may use elementType like `point3f`, `normal3f`, `vec3f`, or sometimes `float3`.
+        // Accept both `*3f` and `*3` when the underlying storage is Float32Array.
+        if (data instanceof Float32Array && elType) {
+            const t = String(elType);
+            if (t.endsWith('3f') || t.endsWith('3')) return data.slice();
+        }
     }
     if (v.type !== 'array') return null;
     const pts = (v as any).value as unknown[];
@@ -89,7 +95,12 @@ export function parseTuple2ArrayToFloat32(v: SdfValue | undefined): Float32Array
     if ((v as any).type === 'typedArray') {
         const elType = (v as any).elementType;
         const data = (v as any).value;
-        if (elType && String(elType).endsWith('2f') && data instanceof Float32Array) return data.slice();
+        // Packed arrays may use elementType like `texCoord2f`, `vec2f`, or sometimes `float2`.
+        // Accept both `*2f` and `*2` when the underlying storage is Float32Array.
+        if (data instanceof Float32Array && elType) {
+            const t = String(elType);
+            if (t.endsWith('2f') || t.endsWith('2')) return data.slice();
+        }
     }
     if (v.type !== 'array') return null;
     const pts = (v as any).value as unknown[];
@@ -99,6 +110,8 @@ export function parseTuple2ArrayToFloat32(v: SdfValue | undefined): Float32Array
         if (!el || typeof el !== 'object') return null;
         let x: any, y: any;
         if ((el as any).type === 'tuple') {
+            [x, y] = (el as any).value ?? [];
+        } else if ((el as any).type === 'vec2f') {
             [x, y] = (el as any).value ?? [];
         } else {
             return null;
@@ -112,9 +125,7 @@ export function parseTuple2ArrayToFloat32(v: SdfValue | undefined): Float32Array
 
 export function getPropMetadataString(prop: { metadata?: Record<string, SdfValue> } | undefined, key: string): string | null {
     const v = prop?.metadata?.[key];
-    if (typeof v === 'string') return v;
-    if (v && typeof v === 'object' && v.type === 'token') return v.value;
-    return null;
+    return extractToken(v) ?? null;
 }
 
 export function getPropMetadataNumber(prop: { metadata?: Record<string, SdfValue> } | undefined, key: string): number | null {
