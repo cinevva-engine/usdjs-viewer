@@ -27,6 +27,7 @@ import { applyCameraSettings as applyCameraSettingsExternal, frameToFit as frame
 import { applyRenderSettings as applyRenderSettingsExternal, ensurePost as ensurePostExternal } from './postprocessing';
 import { advanceAnimationPlayback, applyAnimatedObjectsAtTime } from './animationPlayback';
 import { getThreeDebugInfo as getThreeDebugInfoExternal } from './threeDebug';
+import { buildThreeSceneTree, findObjectByUuid, getObjectProperties, setObjectProperty, EDITABLE_PROPERTIES, parseMaterialKey, findMaterialByKey, getMaterialProperties, setMaterialProperty, parseTextureKey, findTextureByKey, getTextureProperties, setTextureProperty } from './threeSceneTree';
 import { createDomeEnvironmentController } from './domeEnvironment';
 import { loadCorpusEntryExternal } from './corpusEntry';
 import { createRunPipeline } from './runPipeline';
@@ -215,6 +216,7 @@ export function createViewerCore(opts: {
 
   // Grid helper: render after content, enable z-test but disable z-write
   const gridHelper = new THREE.GridHelper(200, 20, 0x333333, 0x222222);
+  gridHelper.name = 'GridHelper';
   gridHelper.renderOrder = 1; // Render after content (default renderOrder is 0)
   gridHelper.traverse((child) => {
     const anyChild = child as any;
@@ -230,6 +232,7 @@ export function createViewerCore(opts: {
 
   // Axes helper: render last, enable z-test but disable z-write
   const axesHelper = new THREE.AxesHelper(20);
+  axesHelper.name = 'AxesHelper';
   axesHelper.renderOrder = 2; // Render last (after grid and content)
   axesHelper.traverse((child) => {
     const anyChild = child as any;
@@ -250,13 +253,17 @@ export function createViewerCore(opts: {
   const xLabel = createAxisLabelSprite({ text: 'X', color: '#ff4d4d' });
   const yLabel = createAxisLabelSprite({ text: 'Y', color: '#4dff4d' });
   const zLabel = createAxisLabelSprite({ text: 'Z', color: '#4d7dff' });
+  xLabel.name = 'AxisLabelX';
+  yLabel.name = 'AxisLabelY';
+  zLabel.name = 'AxisLabelZ';
   xLabel.position.set(axisLen + labelOffset, 0, 0);
   yLabel.position.set(0, axisLen + labelOffset, 0);
   zLabel.position.set(0, 0, axisLen + labelOffset);
   xLabel.renderOrder = 3;
   yLabel.renderOrder = 3;
   zLabel.renderOrder = 3;
-  scene.add(xLabel, yLabel, zLabel);
+  // Add labels as children of axesHelper so they follow when axesHelper moves
+  axesHelper.add(xLabel, yLabel, zLabel);
   const axisLabelSprites: Array<{ sprite: THREE.Sprite; dir: THREE.Vector3 }> = [
     { sprite: xLabel, dir: new THREE.Vector3(1, 0, 0) },
     { sprite: yLabel, dir: new THREE.Vector3(0, 1, 0) },
@@ -301,19 +308,22 @@ export function createViewerCore(opts: {
     axesHelper.position.copy(controls.target);
 
     // Keep axis label sprites at a consistent on-screen size (in pixels).
+    // Labels are children of axesHelper, so positions are in local coordinates.
     if (axisLabelSprites.length) {
-      // Anchor labels on the same origin as the axes helper.
-      const origin = axesHelper.position;
       const viewportH = Math.max(1, renderer.domElement.clientHeight || opts.viewportEl.clientHeight || 1);
       const fovRad = THREE.MathUtils.degToRad(camera.fov);
       const desiredPx = 20; // 2x bigger
 
       for (const { sprite, dir } of axisLabelSprites) {
         const tMax = axisLen + labelOffset;
-        sprite.position.copy(origin.clone().addScaledVector(dir, tMax));
+        // Position in local coordinates (relative to axesHelper)
+        sprite.position.set(dir.x * tMax, dir.y * tMax, dir.z * tMax);
 
         // Keep constant on-screen size: compute world scale from pixel size + camera FOV + distance.
-        const distToCam = camera.position.distanceTo(sprite.position);
+        // Get world position for distance calculation
+        const worldPos = new THREE.Vector3();
+        sprite.getWorldPosition(worldPos);
+        const distToCam = camera.position.distanceTo(worldPos);
         const worldHeightAtDist = 2 * distToCam * Math.tan(fovRad * 0.5);
         const worldSize = (desiredPx * worldHeightAtDist) / viewportH;
         sprite.scale.setScalar(worldSize);
@@ -449,6 +459,129 @@ export function createViewerCore(opts: {
   }
 
   const runSeqRef: { value: number } = { value: 0 };
+  
+  // Store the USD scene tree for prim property lookups
+  let lastSceneTree: SceneNode | null = null;
+  
+  // Map from prim path to Three.js object(s)
+  const primToObjectMap = new Map<string, THREE.Object3D[]>();
+  
+  // Helper to find a prim by path in the scene tree
+  function findSceneNodeByPath(path: string): SceneNode | null {
+    if (!lastSceneTree) return null;
+    
+    function search(node: SceneNode): SceneNode | null {
+      if (node.path === path) return node;
+      for (const child of node.children) {
+        const found = search(child);
+        if (found) return found;
+      }
+      return null;
+    }
+    
+    return search(lastSceneTree);
+  }
+  
+  // Build prim→object mapping by traversing the Three.js scene
+  function buildPrimToObjectMap() {
+    primToObjectMap.clear();
+    let count = 0;
+    contentRoot.traverse((obj) => {
+      if (obj.name && obj.name.startsWith('/')) {
+        const path = obj.name;
+        const existing = primToObjectMap.get(path);
+        if (existing) {
+          existing.push(obj);
+        } else {
+          primToObjectMap.set(path, [obj]);
+        }
+        count++;
+      }
+    });
+    dbg('[buildPrimToObjectMap] Built map with', primToObjectMap.size, 'prim paths,', count, 'total objects');
+  }
+  
+  // Find Three.js objects for a prim path
+  function findObjectsForPrim(path: string): THREE.Object3D[] {
+    return primToObjectMap.get(path) ?? [];
+  }
+  
+  // Set a USD prim property and update the Three.js object(s) incrementally
+  function setPrimPropertyIncremental(path: string, propName: string, value: any): boolean {
+    dbg('[setPrimProperty] path:', path, 'propName:', propName, 'value:', value);
+    const node = findSceneNodeByPath(path);
+    if (!node) {
+      dbg('[setPrimProperty] Node not found for path:', path);
+      return false;
+    }
+    
+    const prim = node.prim;
+    const objects = findObjectsForPrim(path);
+    dbg('[setPrimProperty] Found', objects.length, 'objects for path:', path);
+    
+    // Handle transform properties
+    if (propName === 'xformOp:translate' || propName === 'translate') {
+      // Update the prim property
+      if (!prim.properties) (prim as any).properties = new Map();
+      const prop = prim.properties.get('xformOp:translate');
+      if (prop) {
+        prop.defaultValue = { type: 'tuple', value: [value.x, value.y, value.z] };
+      } else {
+        prim.properties.set('xformOp:translate', {
+          defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
+        } as any);
+      }
+      
+      // Update Three.js objects
+      for (const obj of objects) {
+        obj.position.set(value.x * stageUnitScale, value.y * stageUnitScale, value.z * stageUnitScale);
+      }
+      return true;
+    }
+    
+    if (propName === 'xformOp:rotateXYZ' || propName === 'rotation') {
+      // Update the prim property (stored in degrees)
+      if (!prim.properties) (prim as any).properties = new Map();
+      const prop = prim.properties.get('xformOp:rotateXYZ');
+      if (prop) {
+        prop.defaultValue = { type: 'tuple', value: [value.x, value.y, value.z] };
+      } else {
+        prim.properties.set('xformOp:rotateXYZ', {
+          defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
+        } as any);
+      }
+      
+      // Update Three.js objects (convert degrees to radians)
+      const rx = THREE.MathUtils.degToRad(value.x);
+      const ry = THREE.MathUtils.degToRad(value.y);
+      const rz = THREE.MathUtils.degToRad(value.z);
+      for (const obj of objects) {
+        obj.rotation.set(rx, ry, rz, 'XYZ');
+      }
+      return true;
+    }
+    
+    if (propName === 'xformOp:scale' || propName === 'scale') {
+      // Update the prim property
+      if (!prim.properties) (prim as any).properties = new Map();
+      const prop = prim.properties.get('xformOp:scale');
+      if (prop) {
+        prop.defaultValue = { type: 'tuple', value: [value.x, value.y, value.z] };
+      } else {
+        prim.properties.set('xformOp:scale', {
+          defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
+        } as any);
+      }
+      
+      // Update Three.js objects
+      for (const obj of objects) {
+        obj.scale.set(value.x, value.y, value.z);
+      }
+      return true;
+    }
+    
+    return false;
+  }
 
   const { run } = createRunPipeline({
     dbg,
@@ -456,6 +589,11 @@ export function createViewerCore(opts: {
     perfMeasure,
     onStatus: opts.onStatus,
     onTree: opts.onTree,
+    onSceneTree: (tree) => { 
+      lastSceneTree = tree;
+      // Build prim→object mapping after scene is rendered
+      buildPrimToObjectMap();
+    },
     externalFiles,
     getEntryKey: () => entryKey,
     getTextareaText: () => textareaText,
@@ -521,7 +659,7 @@ export function createViewerCore(opts: {
 
     // Dispose axis label sprites (CanvasTexture + SpriteMaterial)
     for (const { sprite: spr } of axisLabelSprites) {
-      scene.remove(spr);
+      axesHelper.remove(spr);
       const mat = spr.material as THREE.SpriteMaterial;
       mat.map?.dispose();
       mat.dispose();
@@ -570,6 +708,166 @@ export function createViewerCore(opts: {
 
     getThreeDebugInfo: () => {
       return getThreeDebugInfoExternal({ contentRoot, renderer, scene, camera, controls });
+    },
+
+    getThreeSceneTree: () => {
+      return buildThreeSceneTree(scene);
+    },
+
+    findThreeObjectByUuid: (uuid: string) => {
+      return findObjectByUuid(scene, uuid);
+    },
+
+    getThreeObjectProperties: (uuid: string) => {
+      const obj = findObjectByUuid(scene, uuid);
+      if (!obj) return null;
+      return getObjectProperties(obj);
+    },
+
+    setThreeObjectProperty: (uuid: string, path: string, value: any) => {
+      const obj = findObjectByUuid(scene, uuid);
+      if (!obj) return false;
+      return setObjectProperty(obj, path, value);
+    },
+
+    isPropertyEditable: (path: string) => {
+      return path in EDITABLE_PROPERTIES;
+    },
+
+    // Material support
+    isMaterialKey: (key: string) => {
+      return parseMaterialKey(key) !== null;
+    },
+
+    getMaterialProperties: (key: string) => {
+      const mat = findMaterialByKey(scene, key);
+      if (!mat) return null;
+      return getMaterialProperties(mat);
+    },
+
+    setMaterialProperty: (key: string, path: string, value: any) => {
+      const mat = findMaterialByKey(scene, key);
+      if (!mat) return false;
+      return setMaterialProperty(mat, path, value);
+    },
+
+    // Texture support
+    isTextureKey: (key: string) => {
+      return parseTextureKey(key) !== null;
+    },
+
+    getTextureProperties: (key: string) => {
+      const tex = findTextureByKey(scene, key);
+      if (!tex) return null;
+      return getTextureProperties(tex);
+    },
+
+    setTextureProperty: (key: string, path: string, value: any) => {
+      const tex = findTextureByKey(scene, key);
+      if (!tex) return false;
+      return setTextureProperty(tex, path, value);
+    },
+
+    raycastAtNDC: (ndcX: number, ndcY: number): string | null => {
+      const raycaster = new THREE.Raycaster();
+      const pointer = new THREE.Vector2(ndcX, ndcY);
+      raycaster.setFromCamera(pointer, camera);
+      
+      // Only raycast against contentRoot children (the actual scene content, not helpers/grid/axes)
+      const intersects = raycaster.intersectObjects(contentRoot.children, true);
+      
+      if (intersects.length > 0) {
+        // Return the first hit object's UUID
+        return intersects[0]!.object.uuid;
+      }
+      return null;
+    },
+
+    getAncestorUuids: (uuid: string): string[] => {
+      const obj = findObjectByUuid(scene, uuid);
+      if (!obj) return [];
+      
+      const ancestors: string[] = [];
+      let current = obj.parent;
+      while (current) {
+        ancestors.unshift(current.uuid); // Add to front to maintain root-to-parent order
+        current = current.parent;
+      }
+      return ancestors;
+    },
+
+    getPrimProperties: (path: string): Record<string, any> | null => {
+      const node = findSceneNodeByPath(path);
+      if (!node) return null;
+      
+      const prim = node.prim;
+      const result: Record<string, any> = {
+        path: node.path,
+        typeName: node.typeName ?? '(none)',
+      };
+      
+      // Extract transform values (for editable properties)
+      const extractVec3 = (propName: string): { x: number; y: number; z: number } | null => {
+        const prop = prim.properties?.get(propName);
+        const dv = prop?.defaultValue;
+        if (dv && typeof dv === 'object' && 'type' in dv && dv.type === 'tuple' && Array.isArray(dv.value) && dv.value.length >= 3) {
+          return { x: dv.value[0], y: dv.value[1], z: dv.value[2] };
+        }
+        return null;
+      };
+      
+      // Add raw transform values for editing
+      const translate = extractVec3('xformOp:translate');
+      const rotate = extractVec3('xformOp:rotateXYZ');
+      const scale = extractVec3('xformOp:scale');
+      
+      if (translate) result['_translate'] = translate;
+      if (rotate) result['_rotate'] = rotate;
+      if (scale) result['_scale'] = scale;
+      
+      // Add prim metadata
+      if (prim.metadata) {
+        for (const [key, value] of Object.entries(prim.metadata)) {
+          result[`metadata:${key}`] = value;
+        }
+      }
+      
+      // Add properties
+      if (prim.properties) {
+        for (const [name, prop] of prim.properties.entries()) {
+          // Format the value for display
+          let displayValue = prop.defaultValue;
+          if (displayValue !== undefined) {
+            if (typeof displayValue === 'object' && displayValue !== null) {
+              if ('type' in displayValue && 'value' in displayValue) {
+                // Handle typed values like { type: 'tuple', value: [1, 2, 3] }
+                const v = displayValue.value;
+                if (Array.isArray(v)) {
+                  displayValue = `(${v.join(', ')})`;
+                } else {
+                  displayValue = String(v);
+                }
+              } else if (Array.isArray(displayValue)) {
+                displayValue = `[${displayValue.length} items]`;
+              } else {
+                displayValue = JSON.stringify(displayValue);
+              }
+            }
+          }
+          result[name] = displayValue;
+          
+          // If property has time samples, indicate it
+          if (prop.timeSamples && prop.timeSamples.size > 0) {
+            result[`${name} (animated)`] = `${prop.timeSamples.size} keyframes`;
+          }
+        }
+      }
+      
+      return result;
+    },
+
+    setPrimProperty: (path: string, propName: string, value: any): boolean => {
+      return setPrimPropertyIncremental(path, propName, value);
     },
   };
 }

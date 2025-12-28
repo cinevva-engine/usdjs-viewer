@@ -6,6 +6,26 @@ import { resolveMaterialBinding, resolveShaderFromMaterial } from '../materials'
 import { getMdlEnvironmentAsset } from '../materials/mdlSourceAsset';
 import { extractToken } from '../materials/valueExtraction';
 
+// Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+const USDDEBUG =
+  (() => {
+    try {
+      if (typeof window === 'undefined') return false;
+      const q = new URLSearchParams((window as any).location?.search ?? '');
+      if (q.get('usddebug') === '1') return true;
+      if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  })();
+
+const dbg = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.warn('[usdjs-viewer:lights]', ...args);
+};
+
 export function renderUsdLightPrim(opts: {
   typeName: string;
   container: THREE.Object3D;
@@ -103,47 +123,28 @@ export function renderUsdLightPrim(opts: {
       (light.shadow.camera as any).near = 0.1;
       (light.shadow.camera as any).far = 1000;
 
-      // DirectionalLight direction is defined by (position -> target).
-      //
-      // USD DistantLight is documented as: "light from a distant source, along the -Z axis".
-      //
-      // In practice (and to match reference renders), treat that as the *incoming* light direction
-      // (vector from the shaded point toward the light source) being -Z in the light's local space.
-      //
-      // Three.js DirectionalLight uses (position -> target) as the *ray travel* direction
-      // (from light toward the scene), which is the opposite of incoming direction.
-      //
-      // Therefore, to represent incoming local -Z, we set travel to local +Z.
-      //
+      // DirectionalLight direction is defined by (position -> target) (ray travel direction).
+      // USD DistantLight emits light along its local -Z axis by default (UsdLuxDistantLight docs).
       // Keep both light and target under the prim container so authored xforms apply.
       light.position.set(0, 0, 0);
-      // Start from local +Z travel (see comment above about incoming-vs-travel).
-      light.target.position.set(0, 0, 1);
+      light.target.position.set(0, 0, -1);
       container.add(light.target);
       container.add(light);
 
-      // Empirical correction: reference renders for ft-lab expect a 180° yaw relative to our computed travel dir.
-      // Apply a world-space Y rotation by π to the computed direction, then convert back into container-local target.
-      // This preserves authored pitch (top-down) while matching azimuth.
-      requestAnimationFrame(() => {
-        container.updateMatrixWorld(true);
-        light.updateMatrixWorld(true);
-        light.target.updateMatrixWorld(true);
-
-        const lightWorldPos = new THREE.Vector3();
-        const targetWorldPos = new THREE.Vector3();
-        light.getWorldPosition(lightWorldPos);
-        light.target.getWorldPosition(targetWorldPos);
-
-        const worldDir = new THREE.Vector3().subVectors(targetWorldPos, lightWorldPos).normalize();
-        const correctedWorldDir = new THREE.Vector3(-worldDir.x, worldDir.y, -worldDir.z); // RotY(π)
-        const correctedTargetWorld = lightWorldPos.clone().add(correctedWorldDir);
-
-        // Convert corrected target position back into container-local space.
-        const correctedTargetLocal = container.worldToLocal(correctedTargetWorld.clone());
-        light.target.position.copy(correctedTargetLocal);
-        light.target.updateMatrixWorld(true);
-      });
+      if (USDDEBUG) {
+        // Sanity: log the world-space ray travel direction for debugging.
+        requestAnimationFrame(() => {
+          container.updateMatrixWorld(true);
+          light.updateMatrixWorld(true);
+          light.target.updateMatrixWorld(true);
+          const p0 = new THREE.Vector3();
+          const p1 = new THREE.Vector3();
+          light.getWorldPosition(p0);
+          light.target.getWorldPosition(p1);
+          const dir = new THREE.Vector3().subVectors(p1, p0).normalize();
+          dbg('DistantLight world ray direction', prim.path?.primPath, dir.toArray());
+        });
+      }
 
       // Important: do NOT also `scene.add(light)` here; it would detach from `container` and lose authored xforms.
       hasUsdLightsRef.value = true;
@@ -221,9 +222,8 @@ export function renderUsdLightPrim(opts: {
         light.shadow.radius = Math.max(4, THREE.MathUtils.clamp(radiusVal / 10 + s * 8, 0, 15));
 
         // USD SpotLight emits in local -Z direction by default.
-        // Our xform conversion (row-vector -> Three) negates angles, which effectively flips direction.
-        // Compensate by setting the target at +Z, so the negated container rotation produces the correct world dir.
-        light.target.position.set(0, 0, 1);
+        // Three.js SpotLight direction is (position -> target), so target at local -Z matches USD.
+        light.target.position.set(0, 0, -1);
         container.add(light.target);
         container.add(light);
 
@@ -267,7 +267,7 @@ export function renderUsdLightPrim(opts: {
       const L = normalize && area > 0 ? intensityBase / area : intensityBase; // nits (cd/m^2)
       const USD_NITS_TO_THREE_NITS = 8000; // viewer calibration constant (keep consistent with SphereLight mapping)
       const threeIntensity = L / USD_NITS_TO_THREE_NITS;
-      console.log('[RectLight]', prim.path?.primPath, {
+      if (USDDEBUG) dbg('[RectLight]', prim.path?.primPath, {
         usdIntensity: intensityBase,
         normalize,
         area,
@@ -278,16 +278,15 @@ export function renderUsdLightPrim(opts: {
         color: lightColor.getHexString(),
       });
       const light = new THREE.RectAreaLight(lightColor, threeIntensity, widthVal, heightVal);
-      // RectAreaLight emits in local -Z. Our xform conversion negates angles, which flips the emission direction.
-      // Compensate by rotating the light 180° around Y (flip -Z to +Z), so negated container rotation gives correct world dir.
-      light.rotation.set(0, Math.PI, 0);
+      // RectAreaLight emits in local -Z by default (Three's `lookAt` aligns -Z to target).
+      // Keep the light under the prim container so authored xforms apply.
       container.add(light);
       hasUsdLightsRef.value = true;
     } else if (typeName === 'DomeLight') {
       // DomeLight is environment lighting. If a latlong texture is provided, load it and set scene.environment.
       // Otherwise, fall back to a simple hemispherical ambient approximation.
       const texVal = getPrimProp(prim, 'inputs:texture:file') ?? getPrimProp(prim, 'texture:file');
-      console.log('[DomeLight] Raw texture property:', {
+      if (USDDEBUG) dbg('[DomeLight] Raw texture property:', {
         primPath: prim.path?.primPath,
         texVal,
         hasInputsTextureFile: !!getPrimProp(prim, 'inputs:texture:file'),
@@ -302,7 +301,7 @@ export function renderUsdLightPrim(opts: {
             const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
             const normRaw = stripCorpusPrefix(raw);
             const resolved = normFromId ? resolveAssetPath(normRaw, normFromId) : normRaw;
-            console.log('[DomeLight] Texture asset resolution steps:', {
+            if (USDDEBUG) dbg('[DomeLight] Texture asset resolution steps:', {
               raw,
               fromId,
               normFromId,
@@ -337,7 +336,7 @@ export function renderUsdLightPrim(opts: {
         // Check the original texAsset URL for file extension, not the proxy URL
         // (proxy URLs like /__usdjs_proxy?url=... don't have extensions in their pathname)
         const isFile = isProbablyFileUrl(texAsset);
-        console.log('[DomeLight] Texture asset resolution:', {
+        if (USDDEBUG) dbg('[DomeLight] Texture asset resolution:', {
           primPath: prim.path?.primPath,
           texAsset,
           resolvedUrl: url,

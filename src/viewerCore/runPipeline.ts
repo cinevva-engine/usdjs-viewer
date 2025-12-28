@@ -12,6 +12,7 @@ export function createRunPipeline(opts: {
   perfMeasure: (name: string, startMark: string, endMark: string) => void;
   onStatus: (msg: string) => void;
   onTree: (nodes: PrimeTreeNode[], selectedPath: string | null) => void;
+  onSceneTree?: (tree: SceneNode) => void;
 
   externalFiles: Map<string, { name: string; text: string; binary?: ArrayBuffer }>;
   getEntryKey: () => string;
@@ -81,6 +82,7 @@ export function createRunPipeline(opts: {
     perfMeasure,
     onStatus,
     onTree,
+    onSceneTree,
     externalFiles,
     getEntryKey,
     getTextareaText,
@@ -267,6 +269,9 @@ export function createRunPipeline(opts: {
       );
       perfMark(perf('renderPrim:end'));
       perfMeasure(perf('renderPrim'), perf('renderPrim:start'), perf('renderPrim:end'));
+
+      // Notify that the scene tree is ready (after Three.js scene is populated)
+      onSceneTree?.(tree);
 
       // Detect animation time range from stage metadata or animated objects
       const stageStartTime = layerForSettings?.metadata?.startTimeCode;

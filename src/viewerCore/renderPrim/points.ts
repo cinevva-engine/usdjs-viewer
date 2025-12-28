@@ -10,6 +10,8 @@ export function renderPointsPrim(opts: {
     unitScale: number;
 }): void {
     const { container, node, unitScale } = opts;
+    const USDDEBUG =
+        typeof window !== 'undefined' && new URLSearchParams(window.location.search).has('usddebug');
 
     const points = parsePoint3ArrayToFloat32(getPrimProp(node.prim, 'points'));
     if (!points || points.length < 3) {
@@ -53,36 +55,50 @@ export function renderPointsPrim(opts: {
         // Check if we have per-point varying widths
         const hasVaryingWidths = widths && widths.length >= numPoints && new Set(widths).size > 1;
 
-        // Create circular point texture (disc instead of square)
-        const circleCanvas = document.createElement('canvas');
-        circleCanvas.width = 64;
-        circleCanvas.height = 64;
-        const ctx = circleCanvas.getContext('2d');
+        // Point sprite texture (circle alpha mask) + alpha-test in fragment shader.
+        // This matches the typical "point sprite" look and avoids hard square edges.
+        const SPRITE_FILL_SCALE = 1.0;
+        const spriteCanvas = document.createElement('canvas');
+        spriteCanvas.width = 64;
+        spriteCanvas.height = 64;
+        const ctx = spriteCanvas.getContext('2d');
         if (ctx) {
-            ctx.beginPath();
-            ctx.arc(32, 32, 30, 0, Math.PI * 2);
+            ctx.clearRect(0, 0, spriteCanvas.width, spriteCanvas.height);
             ctx.fillStyle = 'white';
+            ctx.beginPath();
+            // Leave a small margin so the circle is cleanly antialiased.
+            ctx.arc(spriteCanvas.width / 2, spriteCanvas.height / 2, 30, 0, Math.PI * 2, false);
+            ctx.closePath();
             ctx.fill();
         }
-        const circleTexture = new THREE.CanvasTexture(circleCanvas);
+        const spriteTexture = new THREE.CanvasTexture(spriteCanvas);
 
         const hasColors = !!(displayColors && displayColors.length >= numPoints * 3);
-        let pointsObj: THREE.Points;
 
-        if (hasVaryingWidths) {
-            // Use custom ShaderMaterial for per-point sizes
-            // Apply unit scale to widths. USD widths are diameters, but Three.js's sizeAttenuation
-            // formula produces points that appear as radius-sized, so we multiply by 2.
-            const scaledWidths = new Float32Array(widths!.length);
-            for (let i = 0; i < widths!.length; i++) {
-                scaledWidths[i] = widths![i]! * unitScale * 2.0;
-            }
-            geom.setAttribute('size', new THREE.BufferAttribute(scaledWidths, 1));
+        // Always use custom ShaderMaterial so behavior is consistent (per-point size/color support),
+        // like three.js webgl_custom_attributes_points.
+        //
+        // Fill per-point `size` attribute:
+        // - if widths are authored per-point, use them
+        // - if a single width is authored, broadcast it
+        // - if unauthored, use the historical default (2.0)
+        const scaledSizes = new Float32Array(numPoints);
+        const defaultWidth = 1.0;
+        const fallbackSize = defaultWidth * unitScale * 2.0 * SPRITE_FILL_SCALE;
+        if (widths && widths.length >= numPoints) {
+            for (let i = 0; i < numPoints; i++) scaledSizes[i] = widths[i]! * unitScale * 2.0 * SPRITE_FILL_SCALE;
+        } else if (widths && widths.length > 0) {
+            const s = widths[0]! * unitScale * 2.0 * SPRITE_FILL_SCALE;
+            scaledSizes.fill(s);
+        } else {
+            scaledSizes.fill(fallbackSize);
+        }
+        geom.setAttribute('size', new THREE.BufferAttribute(scaledSizes, 1));
 
-            // Use the exact same formula as THREE.PointsMaterial with sizeAttenuation:
-            // gl_PointSize = size * (scale / -mvPosition.z)
-            // where scale = canvasHeight / 2.0 (set dynamically via onBeforeRender)
-            const vertexShader = `
+        // Use the exact same formula as THREE.PointsMaterial with sizeAttenuation:
+        // gl_PointSize = size * (scale / -mvPosition.z)
+        // where scale = canvasHeight / 2.0 (set dynamically via onBeforeRender)
+        const vertexShader = `
           uniform float scale;
           attribute float size;
           ${hasColors ? 'attribute vec3 color;' : ''}
@@ -96,55 +112,93 @@ export function renderPointsPrim(opts: {
           }
         `;
 
-            const fragmentShader = `
+        const fragmentShader = `
           uniform sampler2D pointTexture;
           ${hasColors ? 'varying vec3 vColor;' : ''}
           void main() {
             vec4 texColor = texture2D(pointTexture, gl_PointCoord);
+            // Alpha-test: discard fragments outside the sprite mask.
             if (texColor.a < 0.5) discard;
             ${hasColors ? 'gl_FragColor = vec4(vColor, 1.0) * texColor;' : 'gl_FragColor = vec4(1.0, 0.62, 0.29, 1.0) * texColor;'}
           }
         `;
 
-            const shaderMat = new THREE.ShaderMaterial({
-                uniforms: {
-                    pointTexture: { value: circleTexture },
-                    scale: { value: 1.0 }, // Will be updated in onBeforeRender
-                },
-                vertexShader,
-                fragmentShader,
-                transparent: true,
-            });
+        const shaderMat = new THREE.ShaderMaterial({
+            uniforms: {
+                pointTexture: { value: spriteTexture },
+                scale: { value: 1.0 }, // Will be updated in onBeforeRender
+            },
+            vertexShader,
+            fragmentShader,
+            transparent: true,
+        });
 
-            pointsObj = new THREE.Points(geom, shaderMat);
+        const pointsObj = new THREE.Points(geom, shaderMat);
 
-            // Update scale uniform before each render using the exact THREE.js formula:
-            // scale = renderer.getDrawingBufferSize().height / 2
-            pointsObj.onBeforeRender = (renderer: THREE.WebGLRenderer) => {
-                const size = renderer.getDrawingBufferSize(new THREE.Vector2());
-                shaderMat.uniforms.scale!.value = size.height / 2.0;
-            };
-        } else {
-            // Use standard PointsMaterial for uniform sizes
-            // USD widths are diameters, but Three.js's sizeAttenuation formula produces points
-            // that appear as radius-sized, so we multiply by 2.
-            let pointSize = 2.0; // default size in world units (diameter)
-            if (widths && widths.length > 0) {
-                pointSize = widths[0]! * unitScale * 2.0;
+        // Update scale uniform before each render using the exact THREE.js formula:
+        // scale = renderer.getDrawingBufferSize().height / 2
+        pointsObj.onBeforeRender = (renderer: THREE.WebGLRenderer, _scene, camera) => {
+            const buf = renderer.getDrawingBufferSize(new THREE.Vector2());
+            const scale = buf.height / 2.0;
+            shaderMat.uniforms.scale!.value = scale;
+
+            // One-shot debug: print the exact computed sprite size numbers for the first point.
+            // Restrict to points1 to keep output deterministic.
+            if (USDDEBUG && node.path.endsWith('/points1') && !(pointsObj as any).__usdjsLoggedPointSize) {
+                (pointsObj as any).__usdjsLoggedPointSize = true;
+
+                const posAttr = geom.getAttribute('position') as THREE.BufferAttribute | undefined;
+                const sizeAttr = geom.getAttribute('size') as THREE.BufferAttribute | undefined;
+                if (posAttr && sizeAttr && posAttr.count > 0 && sizeAttr.count > 0) {
+                    const localP = new THREE.Vector3(
+                        posAttr.getX(0),
+                        posAttr.getY(0),
+                        posAttr.getZ(0),
+                    );
+                    const worldP = localP.clone().applyMatrix4(pointsObj.matrixWorld);
+                    const viewP = worldP.clone().applyMatrix4(camera.matrixWorldInverse);
+
+                    // This is exactly what the vertex shader uses:
+                    // gl_PointSize = size * (scale / -mvPosition.z)
+                    const size0 = sizeAttr.getX(0);
+                    const mvZ = viewP.z; // equals mvPosition.z for this vertex
+                    const glPointSizePx = size0 * (scale / -mvZ);
+
+                    // Our sprite mask is a 64x64 texture with a circle of radius 30px (diameter 60px),
+                    // centered, leaving 2px transparent margin on each side.
+                    const texSize = 64;
+                    const circleRadiusPx = 30;
+                    const circleDiameterPx = 60;
+                    const marginPx = (texSize - circleDiameterPx) / 2; // 2
+
+                    const visibleRadiusPx = glPointSizePx * (circleRadiusPx / texSize);
+                    const visibleDiameterPx = glPointSizePx * (circleDiameterPx / texSize);
+                    const visibleMarginPx = glPointSizePx * (marginPx / texSize);
+
+                    const payload = {
+                        node: node.path,
+                        unitScale,
+                        widths0: widths?.[0] ?? null,
+                        sizeAttr0_worldUnits: size0,
+                        drawingBuffer: { w: buf.width, h: buf.height },
+                        scale_halfHeight: scale,
+                        mvPositionZ: mvZ,
+                        gl_PointSize_px: glPointSizePx,
+                        spriteMask: {
+                            texSize,
+                            circleRadiusPx,
+                            circleDiameterPx,
+                            marginPx,
+                            visibleRadiusPx,
+                            visibleDiameterPx,
+                            visibleMarginPx,
+                        },
+                    };
+                    // eslint-disable-next-line no-console
+                    console.log('[usdjs-viewer:points] points1[0] size math ' + JSON.stringify(payload));
+                }
             }
-
-            const mat = new THREE.PointsMaterial({
-                size: pointSize,
-                sizeAttenuation: true,
-                vertexColors: hasColors,
-                color: hasColors ? 0xffffff : 0xff9f4a,
-                map: circleTexture,
-                alphaTest: 0.5,
-                transparent: true,
-            });
-
-            pointsObj = new THREE.Points(geom, mat);
-        }
+        };
 
         container.add(pointsObj);
     }

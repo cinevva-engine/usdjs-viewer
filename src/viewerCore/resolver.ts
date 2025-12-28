@@ -41,8 +41,13 @@ export function createTextResolver(opts: {
             if (isExternalUrl) {
                 // For external URLs, use the Vite proxy endpoint to avoid CORS issues
                 try {
-                    const proxyUrl = `/__usdjs_proxy?url=${encodeURIComponent(resolved)}`;
-                    const response = await fetch(proxyUrl);
+                    const fetchViaProxy = async (bust: boolean): Promise<Response> => {
+                        const proxyUrl = `/__usdjs_proxy?url=${encodeURIComponent(resolved)}${bust ? '&bust=1' : ''}`;
+                        return await fetch(proxyUrl);
+                    };
+
+                    // First attempt (normal cache)
+                    let response = await fetchViaProxy(false);
                     if (response.ok) {
                         const contentType = response.headers.get('content-type') || '';
                         // The proxy endpoint converts binary USD files to USDA text, so if we get text/plain, trust it
@@ -102,6 +107,27 @@ export function createTextResolver(opts: {
                                 const { parseUsdaToLayer } = await import('@cinevva/usdjs');
                                 parseUsdaToLayer(text, { identifier: resolved });
                             } catch (parseErr: any) {
+                                // If we got an EOF/truncation-style failure, retry once bypassing proxy cache.
+                                const msg = String(parseErr?.message ?? parseErr ?? '');
+                                const looksTruncated =
+                                    msg.includes('got eof') ||
+                                    msg.includes('got EOF') ||
+                                    msg.includes('Expected "}"') ||
+                                    msg.includes('Expected \\"}\\"');
+                                if (looksTruncated) {
+                                    try {
+                                        response = await fetchViaProxy(true);
+                                        if (response.ok) {
+                                            const retryText = await response.text();
+                                            // Re-run the same validation on the retried content.
+                                            const { parseUsdaToLayer } = await import('@cinevva/usdjs');
+                                            parseUsdaToLayer(retryText, { identifier: resolved });
+                                            return { identifier: resolved, text: retryText };
+                                        }
+                                    } catch {
+                                        // fall through to standard skip below
+                                    }
+                                }
                                 // If quick parse fails, the full parse will likely fail too
                                 console.warn(`Skipping external reference (parse validation failed): ${resolved}`, parseErr?.message || parseErr);
                                 return { identifier: resolved, text: '#usda 1.0\n' };

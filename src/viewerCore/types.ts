@@ -5,6 +5,7 @@ export type PrimeTreeNode = {
     key: string;
     label: string;
     children?: PrimeTreeNode[];
+    styleClass?: string;
     data?: {
         path: string;
         typeName?: string;
@@ -104,6 +105,44 @@ export type ViewerCore = {
 
     // Debugging / introspection (for diagnosing "empty scene" vs "rendered but invisible")
     getThreeDebugInfo(): ThreeDebugInfo;
+
+    // Three.js scene tree (UI exploration / debugging)
+    getThreeSceneTree(): PrimeTreeNode[];
+    findThreeObjectByUuid(uuid: string): THREE.Object3D | null;
+    getThreeObjectProperties(uuid: string): Record<string, any> | null;
+    setThreeObjectProperty(uuid: string, path: string, value: any): boolean;
+    isPropertyEditable(path: string): boolean;
+
+    // Material support
+    isMaterialKey(key: string): boolean;
+    getMaterialProperties(key: string): Record<string, any> | null;
+    setMaterialProperty(key: string, path: string, value: any): boolean;
+
+    // Texture support
+    isTextureKey(key: string): boolean;
+    getTextureProperties(key: string): Record<string, any> | null;
+    setTextureProperty(key: string, path: string, value: any): boolean;
+
+    // Raycasting for picking objects in the scene
+    /**
+     * Perform raycasting at the given normalized device coordinates (-1 to 1).
+     * Returns the UUID of the first hit object, or null if nothing was hit.
+     */
+    raycastAtNDC(ndcX: number, ndcY: number): string | null;
+    
+    /**
+     * Get the ancestor UUIDs of an object (from root to parent, excluding the object itself).
+     * Useful for expanding tree nodes to reveal a selected object.
+     */
+    getAncestorUuids(uuid: string): string[];
+
+    // USD prim properties
+    getPrimProperties(path: string): Record<string, any> | null;
+    /**
+     * Set a USD prim property and update the Three.js scene incrementally.
+     * Supported properties: xformOp:translate, xformOp:rotateXYZ, xformOp:scale
+     */
+    setPrimProperty(path: string, propName: string, value: any): boolean;
 };
 
 

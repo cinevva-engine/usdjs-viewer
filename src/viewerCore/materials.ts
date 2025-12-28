@@ -43,8 +43,14 @@ const dbg = (...args: any[]) => {
   console.log('[usdjs-viewer:materials]', ...args);
 };
 
+const dbgWarn = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.warn('[usdjs-viewer:materials]', ...args);
+};
+
 export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, prototypeRoot?: SdfPrimSpec): SdfPrimSpec | null {
-  console.log('[MATERIALS] resolveMaterialBinding called for prim:', prim.path?.primPath, 'type:', prim.typeName);
+  dbg('resolveMaterialBinding', { prim: prim.path?.primPath, type: prim.typeName });
   // USD material binding commonly inherits down namespace: a parent prim can bind a material
   // that applies to all descendant meshes. So we must walk up ancestors to find the nearest binding.
   //
@@ -112,7 +118,7 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
   }
 
   if (!bindingPath) {
-    console.log('[MATERIALS] No material binding found in ancestors, checking Omniverse ground fallback');
+    dbg('resolveMaterialBinding: no binding found in ancestors, checking Omniverse ground fallback');
     // Omniverse-specific: some scene templates use custom `ground:material:path` metadata on the environment root
     // instead of a proper `rel material:binding = </Material>`. This still represents a real intended USD material.
     //
@@ -121,13 +127,13 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
     // and leaves `rel material:binding` on the `ground` mesh empty.
     const primPath = prim.path?.primPath ?? '';
     const primName = primPath.split('/').filter(Boolean).slice(-1)[0] ?? '';
-    console.log('[MATERIALS] Prim name:', primName);
+    dbg('resolveMaterialBinding: primName', primName);
     if (primName === 'ground') {
       let cur2: SdfPrimSpec | null = prim;
       while (cur2) {
         const dv: any = cur2.properties?.get('ground:material:path')?.defaultValue;
         if (typeof dv === 'string' && dv.startsWith('/')) {
-          console.log('[MATERIALS] Found ground:material:path:', dv);
+          dbg('resolveMaterialBinding: found ground:material:path', dv);
           bindingPath = dv;
           bindingKey = 'ground:material:path';
           break;
@@ -152,13 +158,13 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
   }
 
   if (!bindingPath) {
-    console.log('[MATERIALS] NO material binding found for prim:', prim.path?.primPath);
+    dbg('resolveMaterialBinding: NO material binding found for prim', prim.path?.primPath);
     if (USDDEBUG) dbg(`[resolveMaterialBinding] prim=${prim.path?.primPath} -> NO material binding found (including ancestors)`);
     return null;
   }
 
   const materialPath = bindingPath;
-  console.log('[MATERIALS] Found material binding:', {
+  dbg('resolveMaterialBinding: found material binding', {
     prim: prim.path?.primPath,
     bindingKey,
     materialPath,
@@ -175,10 +181,10 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
   // (for referenced files where paths like /root/Materials/tree_leaves should resolve relative to the reference root).
   if (materialPath.startsWith('/')) {
     const fromRoot = findPrimByPath(root, materialPath);
-    console.log('[MATERIALS] Resolving material from root:', materialPath, '->', fromRoot?.path?.primPath ?? 'null');
+    dbg('resolveMaterialBinding: resolving material from root', { materialPath, resolved: fromRoot?.path?.primPath ?? null });
     if (USDDEBUG) dbg(`[resolveMaterialBinding]   fromRoot(${materialPath})=${fromRoot?.path?.primPath ?? 'null'}`);
     if (fromRoot) {
-      console.log('[MATERIALS] Material found!', fromRoot.path?.primPath, 'type:', fromRoot.typeName);
+      dbg('resolveMaterialBinding: material found', { path: fromRoot.path?.primPath, type: fromRoot.typeName });
       return fromRoot;
     }
 
@@ -222,13 +228,13 @@ export function resolveMaterialBinding(prim: SdfPrimSpec, root: SdfPrimSpec, pro
     return result;
   }
 
-  console.warn('[MATERIALS] FAILED to resolve material:', materialPath);
+  dbgWarn('resolveMaterialBinding: FAILED to resolve material', materialPath);
   if (USDDEBUG) dbg(`[resolveMaterialBinding]   FAILED to resolve material`);
   return null;
 }
 
 export function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSpec): SdfPrimSpec | null {
-  console.log('[MATERIALS] resolveShaderFromMaterial called for material:', material.path?.primPath);
+  dbg('resolveShaderFromMaterial', { material: material.path?.primPath });
   // UsdShade commonly uses `outputs:surface.connect`, but MDL/Omniverse materials often use `outputs:mdl:surface.connect`,
   // and MaterialX uses `outputs:mtlx:surface.connect`.
   // We prioritize MaterialX outputs first since they provide more accurate native shader definitions
@@ -247,13 +253,13 @@ export function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSp
     const dv = prop?.defaultValue as any;
     if (dv && typeof dv === 'object' && dv.type === 'sdfpath' && typeof dv.value === 'string') {
       shaderPath = dv.value;
-      console.log('[MATERIALS] Found shader path from output:', k, '->', shaderPath);
+      dbg('resolveShaderFromMaterial: found shader path from output', { output: k, shaderPath });
       break;
     }
   }
 
   if (!shaderPath) {
-    console.log('[MATERIALS] No shader path found in material outputs, trying fallback');
+    dbg('resolveShaderFromMaterial: no shader path found in material outputs');
     return null;
   }
 
@@ -293,39 +299,39 @@ export function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSp
   };
 
   const shaderName = shaderPath.split('/').pop();
-  console.log('[MATERIALS] Looking for shader:', { shaderPath, shaderName });
+  dbg('resolveShaderFromMaterial: looking for shader', { shaderPath, shaderName });
   if (shaderName && material.children?.has(shaderName)) {
     const childShader = material.children.get(shaderName);
     if (childShader) {
-      console.log('[MATERIALS] Found shader as child of material:', shaderName);
+      dbg('resolveShaderFromMaterial: found shader as child of material', shaderName);
       if (USDDEBUG) dbg(`[resolveShaderFromMaterial] Found shader as child: ${shaderName}`);
       const resolved = followOutputsToShader(childShader);
-      console.log('[MATERIALS] Resolved shader:', resolved?.path?.primPath, 'type:', resolved?.typeName);
+      dbg('resolveShaderFromMaterial: resolved shader', { path: resolved?.path?.primPath, type: resolved?.typeName });
       return resolved;
     }
   }
 
   // Fallback: try absolute path lookup (works for non-referenced materials)
   const result = findPrimByPath(root, shaderPath);
-  console.log('[MATERIALS] Absolute path lookup:', shaderPath, '->', result?.path?.primPath ?? 'null');
+  dbg('resolveShaderFromMaterial: absolute path lookup', { shaderPath, result: result?.path?.primPath ?? null });
   if (USDDEBUG) dbg(`[resolveShaderFromMaterial] shaderPath=${shaderPath}, shaderName=${shaderName}, foundByAbsPath=${result?.path?.primPath ?? 'null'}`);
   if (result) {
     const resolved = followOutputsToShader(result);
-    console.log('[MATERIALS] Resolved shader from absolute path:', resolved?.path?.primPath, 'type:', resolved?.typeName);
+    dbg('resolveShaderFromMaterial: resolved shader from absolute path', { path: resolved?.path?.primPath, type: resolved?.typeName });
     return resolved;
   }
 
   // Last-resort fallback: some composed stages lose/alter `outputs:surface.connect` targets.
   // In that case, try to find *any* Shader under the material prim and use it.
   // This prevents "fully gray" fallback materials when the material binding exists but the connect path doesn't resolve.
-  console.log('[MATERIALS] Trying fallback: searching for any Shader under material');
+  dbg('resolveShaderFromMaterial: trying fallback search for any Shader under material');
   const stack: SdfPrimSpec[] = [];
   if (material.children) for (const c of material.children.values()) stack.push(c);
   while (stack.length) {
     const p = stack.pop()!;
     const infoId = p.properties?.get('info:id')?.defaultValue;
     if (p.typeName === 'Shader' || (typeof infoId === 'string' && infoId.length > 0)) {
-      console.log('[MATERIALS] Fallback found shader:', p.path?.primPath, 'info:id:', infoId);
+      dbg('resolveShaderFromMaterial: fallback found shader', { path: p.path?.primPath, infoId });
       if (USDDEBUG) {
         // eslint-disable-next-line no-console
         console.warn(
@@ -333,12 +339,12 @@ export function resolveShaderFromMaterial(material: SdfPrimSpec, root: SdfPrimSp
         );
       }
       const resolved = followOutputsToShader(p);
-      console.log('[MATERIALS] Resolved fallback shader:', resolved?.path?.primPath);
+      dbg('resolveShaderFromMaterial: resolved fallback shader', resolved?.path?.primPath);
       return resolved;
     }
     if (p.children) for (const c of p.children.values()) stack.push(c);
   }
-  console.warn('[MATERIALS] No shader found for material:', material.path?.primPath);
+  dbgWarn('resolveShaderFromMaterial: no shader found for material', material.path?.primPath);
   return null;
 }
 
