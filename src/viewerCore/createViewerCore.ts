@@ -459,17 +459,17 @@ export function createViewerCore(opts: {
   }
 
   const runSeqRef: { value: number } = { value: 0 };
-  
+
   // Store the USD scene tree for prim property lookups
   let lastSceneTree: SceneNode | null = null;
-  
+
   // Map from prim path to Three.js object(s)
   const primToObjectMap = new Map<string, THREE.Object3D[]>();
-  
+
   // Helper to find a prim by path in the scene tree
   function findSceneNodeByPath(path: string): SceneNode | null {
     if (!lastSceneTree) return null;
-    
+
     function search(node: SceneNode): SceneNode | null {
       if (node.path === path) return node;
       for (const child of node.children) {
@@ -478,17 +478,23 @@ export function createViewerCore(opts: {
       }
       return null;
     }
-    
+
     return search(lastSceneTree);
   }
-  
+
   // Build prim→object mapping by traversing the Three.js scene
+  // Only map the container (transform node) for each prim, not child meshes/lights
   function buildPrimToObjectMap() {
     primToObjectMap.clear();
     let count = 0;
     contentRoot.traverse((obj) => {
       if (obj.name && obj.name.startsWith('/')) {
         const path = obj.name;
+        // Skip if parent has the same name - this is a child mesh/light, not the container
+        // The container is the Object3D that holds the transform, child objects shouldn't be transformed directly
+        if (obj.parent && obj.parent.name === path) {
+          return; // Skip child objects that share the prim path name
+        }
         const existing = primToObjectMap.get(path);
         if (existing) {
           existing.push(obj);
@@ -500,12 +506,12 @@ export function createViewerCore(opts: {
     });
     dbg('[buildPrimToObjectMap] Built map with', primToObjectMap.size, 'prim paths,', count, 'total objects');
   }
-  
+
   // Find Three.js objects for a prim path
   function findObjectsForPrim(path: string): THREE.Object3D[] {
     return primToObjectMap.get(path) ?? [];
   }
-  
+
   // Set a USD prim property and update the Three.js object(s) incrementally
   function setPrimPropertyIncremental(path: string, propName: string, value: any): boolean {
     dbg('[setPrimProperty] path:', path, 'propName:', propName, 'value:', value);
@@ -514,17 +520,17 @@ export function createViewerCore(opts: {
       dbg('[setPrimProperty] Node not found for path:', path);
       return false;
     }
-    
+
     const prim = node.prim;
     const objects = findObjectsForPrim(path);
     dbg('[setPrimProperty] Found', objects.length, 'objects for path:', path);
-    
+
     // Helper to ensure prim.properties exists
     const ensureProperties = () => {
       if (!prim.properties) (prim as any).properties = new Map();
       return prim.properties!;
     };
-    
+
     // Handle transform properties
     if (propName === 'xformOp:translate' || propName === 'translate') {
       // Update the prim property
@@ -537,14 +543,14 @@ export function createViewerCore(opts: {
           defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
         } as any);
       }
-      
+
       // Update Three.js objects
       for (const obj of objects) {
         obj.position.set(value.x * stageUnitScale, value.y * stageUnitScale, value.z * stageUnitScale);
       }
       return true;
     }
-    
+
     if (propName === 'xformOp:rotateXYZ' || propName === 'rotation') {
       // Update the prim property (stored in degrees)
       const props = ensureProperties();
@@ -556,7 +562,7 @@ export function createViewerCore(opts: {
           defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
         } as any);
       }
-      
+
       // Update Three.js objects (convert degrees to radians)
       const rx = THREE.MathUtils.degToRad(value.x);
       const ry = THREE.MathUtils.degToRad(value.y);
@@ -566,7 +572,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     if (propName === 'xformOp:scale' || propName === 'scale') {
       // Update the prim property
       const props = ensureProperties();
@@ -578,14 +584,14 @@ export function createViewerCore(opts: {
           defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
         } as any);
       }
-      
+
       // Update Three.js objects
       for (const obj of objects) {
         obj.scale.set(value.x, value.y, value.z);
       }
       return true;
     }
-    
+
     // Handle visibility property
     if (propName === 'visibility') {
       const props = ensureProperties();
@@ -597,7 +603,7 @@ export function createViewerCore(opts: {
           defaultValue: { type: 'token', value },
         } as any);
       }
-      
+
       // Update Three.js objects
       const isVisible = value !== 'invisible';
       for (const obj of objects) {
@@ -605,7 +611,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle light intensity
     if (propName === 'intensity') {
       const props = ensureProperties();
@@ -615,7 +621,7 @@ export function createViewerCore(opts: {
       } else {
         props.set('intensity', { defaultValue: value } as any);
       }
-      
+
       // Update Three.js light objects
       for (const obj of objects) {
         // Find any lights under this container
@@ -640,7 +646,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle light color
     if (propName === 'color') {
       const props = ensureProperties();
@@ -652,7 +658,7 @@ export function createViewerCore(opts: {
           defaultValue: { type: 'tuple', value: [value.r, value.g, value.b] },
         } as any);
       }
-      
+
       // Update Three.js light objects
       for (const obj of objects) {
         obj.traverse((child) => {
@@ -664,7 +670,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle light angle (for DistantLight/SpotLight)
     if (propName === 'angle') {
       const props = ensureProperties();
@@ -674,7 +680,7 @@ export function createViewerCore(opts: {
       } else {
         props.set('angle', { defaultValue: value } as any);
       }
-      
+
       // Update Three.js spot light angle
       for (const obj of objects) {
         obj.traverse((child) => {
@@ -686,7 +692,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle sphere light radius
     if (propName === 'radius') {
       const props = ensureProperties();
@@ -700,7 +706,7 @@ export function createViewerCore(opts: {
       // A full re-render would be needed to properly apply this
       return true;
     }
-    
+
     // Handle RectAreaLight width/height
     if (propName === 'width' || propName === 'height') {
       const props = ensureProperties();
@@ -710,7 +716,7 @@ export function createViewerCore(opts: {
       } else {
         props.set(propName, { defaultValue: value } as any);
       }
-      
+
       for (const obj of objects) {
         obj.traverse((child) => {
           if ((child as any).isRectAreaLight) {
@@ -722,7 +728,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle mesh doubleSided
     if (propName === 'doubleSided') {
       const props = ensureProperties();
@@ -732,7 +738,7 @@ export function createViewerCore(opts: {
       } else {
         props.set('doubleSided', { defaultValue: value } as any);
       }
-      
+
       // Update material side on mesh objects
       for (const obj of objects) {
         obj.traverse((child) => {
@@ -748,7 +754,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     return false;
   }
 
@@ -758,7 +764,7 @@ export function createViewerCore(opts: {
     perfMeasure,
     onStatus: opts.onStatus,
     onTree: opts.onTree,
-    onSceneTree: (tree) => { 
+    onSceneTree: (tree) => {
       lastSceneTree = tree;
       // Build prim→object mapping after scene is rendered
       buildPrimToObjectMap();
@@ -941,10 +947,10 @@ export function createViewerCore(opts: {
       const raycaster = new THREE.Raycaster();
       const pointer = new THREE.Vector2(ndcX, ndcY);
       raycaster.setFromCamera(pointer, camera);
-      
+
       // Only raycast against contentRoot children (the actual scene content, not helpers/grid/axes)
       const intersects = raycaster.intersectObjects(contentRoot.children, true);
-      
+
       if (intersects.length > 0) {
         // Return the first hit object's UUID
         return intersects[0]!.object.uuid;
@@ -955,7 +961,7 @@ export function createViewerCore(opts: {
     getAncestorUuids: (uuid: string): string[] => {
       const obj = findObjectByUuid(scene, uuid);
       if (!obj) return [];
-      
+
       const ancestors: string[] = [];
       let current = obj.parent;
       while (current) {
@@ -968,13 +974,13 @@ export function createViewerCore(opts: {
     getPrimProperties: (path: string): Record<string, any> | null => {
       const node = findSceneNodeByPath(path);
       if (!node) return null;
-      
+
       const prim = node.prim;
       const result: Record<string, any> = {
         path: node.path,
         typeName: node.typeName ?? '(none)',
       };
-      
+
       // Extract transform values (for editable properties)
       const extractVec3 = (propName: string): { x: number; y: number; z: number } | null => {
         const prop = prim.properties?.get(propName);
@@ -987,16 +993,16 @@ export function createViewerCore(opts: {
         }
         return null;
       };
-      
+
       // Add raw transform values for editing
       const translate = extractVec3('xformOp:translate');
       const rotate = extractVec3('xformOp:rotateXYZ');
       const scale = extractVec3('xformOp:scale');
-      
+
       if (translate) result['_translate'] = translate;
       if (rotate) result['_rotate'] = rotate;
       if (scale) result['_scale'] = scale;
-      
+
       // Extract scalar values
       const extractNumber = (propName: string): number | null => {
         const prop = prim.properties?.get(propName);
@@ -1004,7 +1010,7 @@ export function createViewerCore(opts: {
         if (typeof dv === 'number') return dv;
         return null;
       };
-      
+
       // Extract color (RGB tuple)
       const extractColor = (propName: string): { r: number; g: number; b: number } | null => {
         const prop = prim.properties?.get(propName);
@@ -1017,7 +1023,7 @@ export function createViewerCore(opts: {
         }
         return null;
       };
-      
+
       // Extract visibility (token)
       const visibilityProp = prim.properties?.get('visibility');
       if (visibilityProp?.defaultValue) {
@@ -1028,26 +1034,26 @@ export function createViewerCore(opts: {
           result['_visibility'] = v.value;
         }
       }
-      
+
       // Light-specific editable properties
       const typeName = node.typeName;
       if (typeName === 'DistantLight' || typeName === 'SphereLight' || typeName === 'RectAreaLight' || typeName === 'DomeLight') {
         const intensity = extractNumber('intensity');
         if (intensity !== null) result['_intensity'] = intensity;
-        
+
         const color = extractColor('color');
         if (color) result['_color'] = color;
-        
+
         if (typeName === 'DistantLight') {
           const angle = extractNumber('angle');
           if (angle !== null) result['_angle'] = angle;
         }
-        
+
         if (typeName === 'SphereLight') {
           const radius = extractNumber('radius');
           if (radius !== null) result['_radius'] = radius;
         }
-        
+
         if (typeName === 'RectAreaLight') {
           const width = extractNumber('width');
           const height = extractNumber('height');
@@ -1055,7 +1061,7 @@ export function createViewerCore(opts: {
           if (height !== null) result['_height'] = height;
         }
       }
-      
+
       // Mesh-specific editable properties
       if (typeName === 'Mesh') {
         const doubleSidedProp = prim.properties?.get('doubleSided');
@@ -1063,14 +1069,14 @@ export function createViewerCore(opts: {
           result['_doubleSided'] = !!doubleSidedProp.defaultValue;
         }
       }
-      
+
       // Add prim metadata
       if (prim.metadata) {
         for (const [key, value] of Object.entries(prim.metadata)) {
           result[`metadata:${key}`] = value;
         }
       }
-      
+
       // Add properties
       if (prim.properties) {
         for (const [name, prop] of prim.properties.entries()) {
@@ -1094,14 +1100,14 @@ export function createViewerCore(opts: {
             }
           }
           result[name] = displayValue;
-          
+
           // If property has time samples, indicate it
           if (prop.timeSamples && prop.timeSamples.size > 0) {
             result[`${name} (animated)`] = `${prop.timeSamples.size} keyframes`;
           }
         }
       }
-      
+
       return result;
     },
 
