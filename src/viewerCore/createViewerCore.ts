@@ -754,7 +754,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle light exposure
     if (propName === 'exposure') {
       const props = ensureProperties();
@@ -764,12 +764,12 @@ export function createViewerCore(opts: {
       } else {
         props.set('exposure', { defaultValue: value } as any);
       }
-      
+
       // Recalculate intensity with new exposure
       const intensityProp = prim.properties?.get('intensity')?.defaultValue;
       const baseIntensity = typeof intensityProp === 'number' ? intensityProp : 1.0;
       const newIntensity = baseIntensity * Math.pow(2, value);
-      
+
       for (const obj of objects) {
         obj.traverse((child) => {
           if ((child as any).isLight) {
@@ -785,7 +785,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle spotlight shaping cone angle
     if (propName === 'shaping:cone:angle') {
       const props = ensureProperties();
@@ -795,7 +795,7 @@ export function createViewerCore(opts: {
       } else {
         props.set('shaping:cone:angle', { defaultValue: value } as any);
       }
-      
+
       for (const obj of objects) {
         obj.traverse((child) => {
           if ((child as any).isSpotLight) {
@@ -807,7 +807,7 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle spotlight shaping cone softness (penumbra)
     if (propName === 'shaping:cone:softness') {
       const props = ensureProperties();
@@ -817,7 +817,7 @@ export function createViewerCore(opts: {
       } else {
         props.set('shaping:cone:softness', { defaultValue: value } as any);
       }
-      
+
       for (const obj of objects) {
         obj.traverse((child) => {
           if ((child as any).isSpotLight) {
@@ -829,14 +829,19 @@ export function createViewerCore(opts: {
       }
       return true;
     }
-    
+
     // Handle basic primitive geometry properties (requires geometry recreation)
     // Helper to recreate geometry for basic primitives
     const recreatePrimitiveGeometry = (typeName: string) => {
       const props = prim.properties ?? new Map();
       const getNum = (name: string, def: number) => {
         const p = props.get(name)?.defaultValue;
-        return typeof p === 'number' ? p : def;
+        if (typeof p === 'number') return p;
+        // Handle wrapped numeric types
+        if (p && typeof p === 'object' && 'value' in p && typeof p.value === 'number') {
+          return p.value;
+        }
+        return def;
       };
       const getAxis = (name: string) => {
         const p = props.get(name)?.defaultValue;
@@ -844,10 +849,10 @@ export function createViewerCore(opts: {
         if (p && typeof p === 'object' && 'type' in p && p.type === 'token') return p.value as string;
         return 'Y';
       };
-      
+
       let newGeom: THREE.BufferGeometry | null = null;
       let axisRotation: THREE.Euler | null = null;
-      
+
       if (typeName === 'Sphere') {
         const r = getNum('radius', 1) * stageUnitScale;
         newGeom = new THREE.SphereGeometry(r, 24, 16);
@@ -876,7 +881,7 @@ export function createViewerCore(opts: {
         if (axis === 'X') axisRotation = new THREE.Euler(0, 0, -Math.PI / 2);
         else if (axis === 'Z') axisRotation = new THREE.Euler(Math.PI / 2, 0, 0);
       }
-      
+
       if (newGeom) {
         for (const obj of objects) {
           obj.traverse((child) => {
@@ -896,28 +901,28 @@ export function createViewerCore(opts: {
       }
       return false;
     };
-    
+
     // Sphere radius
     if (propName === 'radius' && (node.typeName === 'Sphere' || node.typeName === 'Cylinder' || node.typeName === 'Cone' || node.typeName === 'Capsule')) {
       const props = ensureProperties();
       props.set('radius', { defaultValue: value } as any);
       return recreatePrimitiveGeometry(node.typeName!);
     }
-    
+
     // Cube size
     if (propName === 'size' && node.typeName === 'Cube') {
       const props = ensureProperties();
       props.set('size', { defaultValue: value } as any);
       return recreatePrimitiveGeometry('Cube');
     }
-    
+
     // Cylinder/Cone/Capsule height
     if (propName === 'height' && (node.typeName === 'Cylinder' || node.typeName === 'Cone' || node.typeName === 'Capsule')) {
       const props = ensureProperties();
       props.set('height', { defaultValue: value } as any);
       return recreatePrimitiveGeometry(node.typeName!);
     }
-    
+
     // Axis for Cylinder/Cone/Capsule
     if (propName === 'axis' && (node.typeName === 'Cylinder' || node.typeName === 'Cone' || node.typeName === 'Capsule')) {
       const props = ensureProperties();
@@ -1174,10 +1179,15 @@ export function createViewerCore(opts: {
       if (scale) result['_scale'] = scale;
 
       // Extract scalar values
+      // Note: USD values may be raw numbers or wrapped in { type: 'double'|'float', value: ... }
       const extractNumber = (propName: string): number | null => {
         const prop = prim.properties?.get(propName);
         const dv = prop?.defaultValue;
         if (typeof dv === 'number') return dv;
+        // Handle wrapped numeric types (double, float, int, etc.)
+        if (dv && typeof dv === 'object' && 'value' in dv && typeof dv.value === 'number') {
+          return dv.value;
+        }
         return null;
       };
 
@@ -1215,13 +1225,13 @@ export function createViewerCore(opts: {
         }
         return null;
       };
-      
+
       // Light-specific editable properties
       const typeName = node.typeName;
       if (typeName === 'DistantLight' || typeName === 'SphereLight' || typeName === 'RectLight' || typeName === 'RectAreaLight' || typeName === 'DomeLight') {
         const intensity = extractNumber('intensity');
         if (intensity !== null) result['_intensity'] = intensity;
-        
+
         const exposure = extractNumber('exposure');
         if (exposure !== null) result['_exposure'] = exposure;
 
@@ -1256,12 +1266,12 @@ export function createViewerCore(opts: {
         const radius = extractNumber('radius');
         result['_radius'] = radius ?? 1; // USD default is 1
       }
-      
+
       if (typeName === 'Cube') {
         const size = extractNumber('size');
         result['_size'] = size ?? 2; // USD default is 2
       }
-      
+
       if (typeName === 'Cylinder') {
         const radius = extractNumber('radius');
         const height = extractNumber('height');
@@ -1270,7 +1280,7 @@ export function createViewerCore(opts: {
         result['_height'] = height ?? 2;
         result['_axis'] = axis ?? 'Y';
       }
-      
+
       if (typeName === 'Cone') {
         const radius = extractNumber('radius');
         const height = extractNumber('height');
@@ -1279,7 +1289,7 @@ export function createViewerCore(opts: {
         result['_height'] = height ?? 2;
         result['_axis'] = axis ?? 'Y';
       }
-      
+
       if (typeName === 'Capsule') {
         const radius = extractNumber('radius');
         const height = extractNumber('height');
