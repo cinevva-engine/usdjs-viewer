@@ -209,6 +209,139 @@
                         />
                       </div>
                     </div>
+                    <!-- Visibility -->
+                    <div v-if="selectedPrimProps._visibility !== undefined" class="property-row">
+                      <div class="property-key">visibility:</div>
+                      <div class="property-value">
+                        <Select
+                          :modelValue="selectedPrimProps._visibility"
+                          :options="['inherited', 'invisible']"
+                          @update:modelValue="(v) => onPrimScalarEdit('visibility', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Light Intensity -->
+                    <div v-if="selectedPrimProps._intensity !== undefined" class="property-row">
+                      <div class="property-key">intensity:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._intensity"
+                          :minFractionDigits="0"
+                          :maxFractionDigits="1"
+                          :step="100"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('intensity', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Light Color -->
+                    <div v-if="selectedPrimProps._color" class="property-row">
+                      <div class="property-key">color:</div>
+                      <div class="property-value vector3-value">
+                        <InputNumber
+                          class="vector3-input"
+                          :modelValue="selectedPrimProps._color.r"
+                          :minFractionDigits="2"
+                          :maxFractionDigits="3"
+                          :min="0"
+                          :max="1"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimColorEdit('color', 'r', v)"
+                        />
+                        <InputNumber
+                          class="vector3-input"
+                          :modelValue="selectedPrimProps._color.g"
+                          :minFractionDigits="2"
+                          :maxFractionDigits="3"
+                          :min="0"
+                          :max="1"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimColorEdit('color', 'g', v)"
+                        />
+                        <InputNumber
+                          class="vector3-input"
+                          :modelValue="selectedPrimProps._color.b"
+                          :minFractionDigits="2"
+                          :maxFractionDigits="3"
+                          :min="0"
+                          :max="1"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimColorEdit('color', 'b', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Light Angle (DistantLight) -->
+                    <div v-if="selectedPrimProps._angle !== undefined" class="property-row">
+                      <div class="property-key">angle:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._angle"
+                          :minFractionDigits="1"
+                          :maxFractionDigits="2"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('angle', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Light Radius (SphereLight) -->
+                    <div v-if="selectedPrimProps._radius !== undefined" class="property-row">
+                      <div class="property-key">radius:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._radius"
+                          :minFractionDigits="1"
+                          :maxFractionDigits="2"
+                          :min="0"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('radius', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- RectAreaLight Width/Height -->
+                    <div v-if="selectedPrimProps._width !== undefined" class="property-row">
+                      <div class="property-key">width:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._width"
+                          :minFractionDigits="1"
+                          :maxFractionDigits="2"
+                          :min="0"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('width', v)"
+                        />
+                      </div>
+                    </div>
+                    <div v-if="selectedPrimProps._height !== undefined" class="property-row">
+                      <div class="property-key">height:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._height"
+                          :minFractionDigits="1"
+                          :maxFractionDigits="2"
+                          :min="0"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('height', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Mesh doubleSided -->
+                    <div v-if="selectedPrimProps._doubleSided !== undefined" class="property-row">
+                      <div class="property-key">doubleSided:</div>
+                      <div class="property-value">
+                        <Checkbox
+                          :modelValue="selectedPrimProps._doubleSided"
+                          :binary="true"
+                          @update:modelValue="(v) => onPrimScalarEdit('doubleSided', v)"
+                        />
+                      </div>
+                    </div>
                     <!-- Other Properties (read-only) -->
                     <div v-for="(value, key) in filteredPrimProps" :key="key" class="property-row">
                       <div class="property-key">{{ key }}:</div>
@@ -561,6 +694,42 @@ function onPrimPropertyEdit(propName: string, component: 'x' | 'y' | 'z', value:
   if (!rawKey) return;
   
   const current = selectedPrimProps.value[rawKey] ?? { x: 0, y: 0, z: 0 };
+  const newValue = { ...current, [component]: value ?? 0 };
+  
+  // Apply the change incrementally
+  const success = core.value.setPrimProperty(selectedPrimPath.value, propName, newValue);
+  if (success) {
+    // Update local state to reflect the change
+    selectedPrimProps.value = {
+      ...selectedPrimProps.value,
+      [rawKey]: newValue,
+    };
+  }
+}
+
+// Handle scalar prim property edits (visibility, intensity, angle, etc.)
+function onPrimScalarEdit(propName: string, value: any) {
+  if (!selectedPrimPath.value || !selectedPrimProps.value || !core.value) return;
+  
+  // Apply the change incrementally
+  const success = core.value.setPrimProperty(selectedPrimPath.value, propName, value);
+  if (success) {
+    // Map property name to internal key
+    const rawKey = `_${propName}`;
+    // Update local state to reflect the change
+    selectedPrimProps.value = {
+      ...selectedPrimProps.value,
+      [rawKey]: value,
+    };
+  }
+}
+
+// Handle color prim property edits (r, g, b components)
+function onPrimColorEdit(propName: string, component: 'r' | 'g' | 'b', value: number | null) {
+  if (!selectedPrimPath.value || !selectedPrimProps.value || !core.value) return;
+  
+  const rawKey = `_${propName}`;
+  const current = selectedPrimProps.value[rawKey] ?? { r: 1, g: 1, b: 1 };
   const newValue = { ...current, [component]: value ?? 0 };
   
   // Apply the change incrementally

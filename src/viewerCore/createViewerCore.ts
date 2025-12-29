@@ -519,15 +519,21 @@ export function createViewerCore(opts: {
     const objects = findObjectsForPrim(path);
     dbg('[setPrimProperty] Found', objects.length, 'objects for path:', path);
     
+    // Helper to ensure prim.properties exists
+    const ensureProperties = () => {
+      if (!prim.properties) (prim as any).properties = new Map();
+      return prim.properties!;
+    };
+    
     // Handle transform properties
     if (propName === 'xformOp:translate' || propName === 'translate') {
       // Update the prim property
-      if (!prim.properties) (prim as any).properties = new Map();
-      const prop = prim.properties.get('xformOp:translate');
+      const props = ensureProperties();
+      const prop = props.get('xformOp:translate');
       if (prop) {
         prop.defaultValue = { type: 'tuple', value: [value.x, value.y, value.z] };
       } else {
-        prim.properties.set('xformOp:translate', {
+        props.set('xformOp:translate', {
           defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
         } as any);
       }
@@ -541,12 +547,12 @@ export function createViewerCore(opts: {
     
     if (propName === 'xformOp:rotateXYZ' || propName === 'rotation') {
       // Update the prim property (stored in degrees)
-      if (!prim.properties) (prim as any).properties = new Map();
-      const prop = prim.properties.get('xformOp:rotateXYZ');
+      const props = ensureProperties();
+      const prop = props.get('xformOp:rotateXYZ');
       if (prop) {
         prop.defaultValue = { type: 'tuple', value: [value.x, value.y, value.z] };
       } else {
-        prim.properties.set('xformOp:rotateXYZ', {
+        props.set('xformOp:rotateXYZ', {
           defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
         } as any);
       }
@@ -563,12 +569,12 @@ export function createViewerCore(opts: {
     
     if (propName === 'xformOp:scale' || propName === 'scale') {
       // Update the prim property
-      if (!prim.properties) (prim as any).properties = new Map();
-      const prop = prim.properties.get('xformOp:scale');
+      const props = ensureProperties();
+      const prop = props.get('xformOp:scale');
       if (prop) {
         prop.defaultValue = { type: 'tuple', value: [value.x, value.y, value.z] };
       } else {
-        prim.properties.set('xformOp:scale', {
+        props.set('xformOp:scale', {
           defaultValue: { type: 'tuple', value: [value.x, value.y, value.z] },
         } as any);
       }
@@ -576,6 +582,169 @@ export function createViewerCore(opts: {
       // Update Three.js objects
       for (const obj of objects) {
         obj.scale.set(value.x, value.y, value.z);
+      }
+      return true;
+    }
+    
+    // Handle visibility property
+    if (propName === 'visibility') {
+      const props = ensureProperties();
+      const prop = props.get('visibility');
+      if (prop) {
+        prop.defaultValue = { type: 'token', value };
+      } else {
+        props.set('visibility', {
+          defaultValue: { type: 'token', value },
+        } as any);
+      }
+      
+      // Update Three.js objects
+      const isVisible = value !== 'invisible';
+      for (const obj of objects) {
+        obj.visible = isVisible;
+      }
+      return true;
+    }
+    
+    // Handle light intensity
+    if (propName === 'intensity') {
+      const props = ensureProperties();
+      const prop = props.get('intensity');
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set('intensity', { defaultValue: value } as any);
+      }
+      
+      // Update Three.js light objects
+      for (const obj of objects) {
+        // Find any lights under this container
+        obj.traverse((child) => {
+          if ((child as any).isLight) {
+            const light = child as THREE.Light;
+            // USD intensity needs conversion based on light type
+            const typeName = node.typeName;
+            if (typeName === 'DistantLight') {
+              light.intensity = value / 1000;
+            } else if (typeName === 'SphereLight' || typeName === 'RectAreaLight') {
+              // Approximate conversion for point/spot/area lights
+              const exposureProp = prim.properties?.get('exposure')?.defaultValue;
+              const exposureVal = typeof exposureProp === 'number' ? exposureProp : 0;
+              const intensityBase = value * Math.pow(2, exposureVal);
+              light.intensity = intensityBase / 8000;
+            } else {
+              light.intensity = value / 1000;
+            }
+          }
+        });
+      }
+      return true;
+    }
+    
+    // Handle light color
+    if (propName === 'color') {
+      const props = ensureProperties();
+      const prop = props.get('color');
+      if (prop) {
+        prop.defaultValue = { type: 'tuple', value: [value.r, value.g, value.b] };
+      } else {
+        props.set('color', {
+          defaultValue: { type: 'tuple', value: [value.r, value.g, value.b] },
+        } as any);
+      }
+      
+      // Update Three.js light objects
+      for (const obj of objects) {
+        obj.traverse((child) => {
+          if ((child as any).isLight) {
+            const light = child as THREE.Light;
+            light.color.setRGB(value.r, value.g, value.b);
+          }
+        });
+      }
+      return true;
+    }
+    
+    // Handle light angle (for DistantLight/SpotLight)
+    if (propName === 'angle') {
+      const props = ensureProperties();
+      const prop = props.get('angle');
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set('angle', { defaultValue: value } as any);
+      }
+      
+      // Update Three.js spot light angle
+      for (const obj of objects) {
+        obj.traverse((child) => {
+          if ((child as any).isSpotLight) {
+            const spot = child as THREE.SpotLight;
+            spot.angle = THREE.MathUtils.degToRad(value);
+          }
+        });
+      }
+      return true;
+    }
+    
+    // Handle sphere light radius
+    if (propName === 'radius') {
+      const props = ensureProperties();
+      const prop = props.get('radius');
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set('radius', { defaultValue: value } as any);
+      }
+      // Note: radius affects intensity calculation in Three.js point lights
+      // A full re-render would be needed to properly apply this
+      return true;
+    }
+    
+    // Handle RectAreaLight width/height
+    if (propName === 'width' || propName === 'height') {
+      const props = ensureProperties();
+      const prop = props.get(propName);
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set(propName, { defaultValue: value } as any);
+      }
+      
+      for (const obj of objects) {
+        obj.traverse((child) => {
+          if ((child as any).isRectAreaLight) {
+            const rect = child as THREE.RectAreaLight;
+            if (propName === 'width') rect.width = value * stageUnitScale;
+            if (propName === 'height') rect.height = value * stageUnitScale;
+          }
+        });
+      }
+      return true;
+    }
+    
+    // Handle mesh doubleSided
+    if (propName === 'doubleSided') {
+      const props = ensureProperties();
+      const prop = props.get('doubleSided');
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set('doubleSided', { defaultValue: value } as any);
+      }
+      
+      // Update material side on mesh objects
+      for (const obj of objects) {
+        obj.traverse((child) => {
+          if ((child as any).isMesh) {
+            const mesh = child as THREE.Mesh;
+            if (mesh.material) {
+              const mat = mesh.material as THREE.Material;
+              mat.side = value ? THREE.DoubleSide : THREE.FrontSide;
+              mat.needsUpdate = true;
+            }
+          }
+        });
       }
       return true;
     }
@@ -811,7 +980,10 @@ export function createViewerCore(opts: {
         const prop = prim.properties?.get(propName);
         const dv = prop?.defaultValue;
         if (dv && typeof dv === 'object' && 'type' in dv && dv.type === 'tuple' && Array.isArray(dv.value) && dv.value.length >= 3) {
-          return { x: dv.value[0], y: dv.value[1], z: dv.value[2] };
+          const [x, y, z] = dv.value;
+          if (typeof x === 'number' && typeof y === 'number' && typeof z === 'number') {
+            return { x, y, z };
+          }
         }
         return null;
       };
@@ -824,6 +996,73 @@ export function createViewerCore(opts: {
       if (translate) result['_translate'] = translate;
       if (rotate) result['_rotate'] = rotate;
       if (scale) result['_scale'] = scale;
+      
+      // Extract scalar values
+      const extractNumber = (propName: string): number | null => {
+        const prop = prim.properties?.get(propName);
+        const dv = prop?.defaultValue;
+        if (typeof dv === 'number') return dv;
+        return null;
+      };
+      
+      // Extract color (RGB tuple)
+      const extractColor = (propName: string): { r: number; g: number; b: number } | null => {
+        const prop = prim.properties?.get(propName);
+        const dv = prop?.defaultValue;
+        if (dv && typeof dv === 'object' && 'type' in dv && dv.type === 'tuple' && Array.isArray(dv.value) && dv.value.length >= 3) {
+          const [r, g, b] = dv.value;
+          if (typeof r === 'number' && typeof g === 'number' && typeof b === 'number') {
+            return { r, g, b };
+          }
+        }
+        return null;
+      };
+      
+      // Extract visibility (token)
+      const visibilityProp = prim.properties?.get('visibility');
+      if (visibilityProp?.defaultValue) {
+        const v = visibilityProp.defaultValue;
+        if (typeof v === 'string') {
+          result['_visibility'] = v;
+        } else if (typeof v === 'object' && 'type' in v && v.type === 'token') {
+          result['_visibility'] = v.value;
+        }
+      }
+      
+      // Light-specific editable properties
+      const typeName = node.typeName;
+      if (typeName === 'DistantLight' || typeName === 'SphereLight' || typeName === 'RectAreaLight' || typeName === 'DomeLight') {
+        const intensity = extractNumber('intensity');
+        if (intensity !== null) result['_intensity'] = intensity;
+        
+        const color = extractColor('color');
+        if (color) result['_color'] = color;
+        
+        if (typeName === 'DistantLight') {
+          const angle = extractNumber('angle');
+          if (angle !== null) result['_angle'] = angle;
+        }
+        
+        if (typeName === 'SphereLight') {
+          const radius = extractNumber('radius');
+          if (radius !== null) result['_radius'] = radius;
+        }
+        
+        if (typeName === 'RectAreaLight') {
+          const width = extractNumber('width');
+          const height = extractNumber('height');
+          if (width !== null) result['_width'] = width;
+          if (height !== null) result['_height'] = height;
+        }
+      }
+      
+      // Mesh-specific editable properties
+      if (typeName === 'Mesh') {
+        const doubleSidedProp = prim.properties?.get('doubleSided');
+        if (doubleSidedProp?.defaultValue !== undefined) {
+          result['_doubleSided'] = !!doubleSidedProp.defaultValue;
+        }
+      }
       
       // Add prim metadata
       if (prim.metadata) {
