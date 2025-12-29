@@ -754,6 +754,176 @@ export function createViewerCore(opts: {
       }
       return true;
     }
+    
+    // Handle light exposure
+    if (propName === 'exposure') {
+      const props = ensureProperties();
+      const prop = props.get('exposure');
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set('exposure', { defaultValue: value } as any);
+      }
+      
+      // Recalculate intensity with new exposure
+      const intensityProp = prim.properties?.get('intensity')?.defaultValue;
+      const baseIntensity = typeof intensityProp === 'number' ? intensityProp : 1.0;
+      const newIntensity = baseIntensity * Math.pow(2, value);
+      
+      for (const obj of objects) {
+        obj.traverse((child) => {
+          if ((child as any).isLight) {
+            const light = child as THREE.Light;
+            const typeName = node.typeName;
+            if (typeName === 'DistantLight') {
+              light.intensity = newIntensity / 1000;
+            } else {
+              light.intensity = newIntensity / 8000;
+            }
+          }
+        });
+      }
+      return true;
+    }
+    
+    // Handle spotlight shaping cone angle
+    if (propName === 'shaping:cone:angle') {
+      const props = ensureProperties();
+      const prop = props.get('shaping:cone:angle');
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set('shaping:cone:angle', { defaultValue: value } as any);
+      }
+      
+      for (const obj of objects) {
+        obj.traverse((child) => {
+          if ((child as any).isSpotLight) {
+            const spot = child as THREE.SpotLight;
+            // USD cone angle is half-angle in degrees
+            spot.angle = THREE.MathUtils.degToRad(value);
+          }
+        });
+      }
+      return true;
+    }
+    
+    // Handle spotlight shaping cone softness (penumbra)
+    if (propName === 'shaping:cone:softness') {
+      const props = ensureProperties();
+      const prop = props.get('shaping:cone:softness');
+      if (prop) {
+        prop.defaultValue = value;
+      } else {
+        props.set('shaping:cone:softness', { defaultValue: value } as any);
+      }
+      
+      for (const obj of objects) {
+        obj.traverse((child) => {
+          if ((child as any).isSpotLight) {
+            const spot = child as THREE.SpotLight;
+            // USD softness 0-1 maps to Three.js penumbra 0-1
+            spot.penumbra = THREE.MathUtils.clamp(value, 0, 1);
+          }
+        });
+      }
+      return true;
+    }
+    
+    // Handle basic primitive geometry properties (requires geometry recreation)
+    // Helper to recreate geometry for basic primitives
+    const recreatePrimitiveGeometry = (typeName: string) => {
+      const props = prim.properties ?? new Map();
+      const getNum = (name: string, def: number) => {
+        const p = props.get(name)?.defaultValue;
+        return typeof p === 'number' ? p : def;
+      };
+      const getAxis = (name: string) => {
+        const p = props.get(name)?.defaultValue;
+        if (typeof p === 'string') return p;
+        if (p && typeof p === 'object' && 'type' in p && p.type === 'token') return p.value as string;
+        return 'Y';
+      };
+      
+      let newGeom: THREE.BufferGeometry | null = null;
+      let axisRotation: THREE.Euler | null = null;
+      
+      if (typeName === 'Sphere') {
+        const r = getNum('radius', 1) * stageUnitScale;
+        newGeom = new THREE.SphereGeometry(r, 24, 16);
+      } else if (typeName === 'Cube') {
+        const s = getNum('size', 2) * stageUnitScale;
+        newGeom = new THREE.BoxGeometry(s, s, s);
+      } else if (typeName === 'Cylinder') {
+        const r = getNum('radius', 1) * stageUnitScale;
+        const h = getNum('height', 2) * stageUnitScale;
+        const axis = getAxis('axis');
+        newGeom = new THREE.CylinderGeometry(r, r, h, 24, 1);
+        if (axis === 'X') axisRotation = new THREE.Euler(0, 0, -Math.PI / 2);
+        else if (axis === 'Z') axisRotation = new THREE.Euler(Math.PI / 2, 0, 0);
+      } else if (typeName === 'Cone') {
+        const r = getNum('radius', 1) * stageUnitScale;
+        const h = getNum('height', 2) * stageUnitScale;
+        const axis = getAxis('axis');
+        newGeom = new THREE.ConeGeometry(r, h, 24, 1);
+        if (axis === 'X') axisRotation = new THREE.Euler(0, 0, -Math.PI / 2);
+        else if (axis === 'Z') axisRotation = new THREE.Euler(Math.PI / 2, 0, 0);
+      } else if (typeName === 'Capsule') {
+        const r = getNum('radius', 0.5) * stageUnitScale;
+        const h = getNum('height', 1) * stageUnitScale;
+        const axis = getAxis('axis');
+        newGeom = new THREE.CapsuleGeometry(r, h, 8, 16);
+        if (axis === 'X') axisRotation = new THREE.Euler(0, 0, -Math.PI / 2);
+        else if (axis === 'Z') axisRotation = new THREE.Euler(Math.PI / 2, 0, 0);
+      }
+      
+      if (newGeom) {
+        for (const obj of objects) {
+          obj.traverse((child) => {
+            if ((child as any).isMesh) {
+              const mesh = child as THREE.Mesh;
+              mesh.geometry.dispose();
+              mesh.geometry = newGeom!;
+              if (axisRotation) {
+                mesh.rotation.copy(axisRotation);
+              } else {
+                mesh.rotation.set(0, 0, 0);
+              }
+            }
+          });
+        }
+        return true;
+      }
+      return false;
+    };
+    
+    // Sphere radius
+    if (propName === 'radius' && (node.typeName === 'Sphere' || node.typeName === 'Cylinder' || node.typeName === 'Cone' || node.typeName === 'Capsule')) {
+      const props = ensureProperties();
+      props.set('radius', { defaultValue: value } as any);
+      return recreatePrimitiveGeometry(node.typeName!);
+    }
+    
+    // Cube size
+    if (propName === 'size' && node.typeName === 'Cube') {
+      const props = ensureProperties();
+      props.set('size', { defaultValue: value } as any);
+      return recreatePrimitiveGeometry('Cube');
+    }
+    
+    // Cylinder/Cone/Capsule height
+    if (propName === 'height' && (node.typeName === 'Cylinder' || node.typeName === 'Cone' || node.typeName === 'Capsule')) {
+      const props = ensureProperties();
+      props.set('height', { defaultValue: value } as any);
+      return recreatePrimitiveGeometry(node.typeName!);
+    }
+    
+    // Axis for Cylinder/Cone/Capsule
+    if (propName === 'axis' && (node.typeName === 'Cylinder' || node.typeName === 'Cone' || node.typeName === 'Capsule')) {
+      const props = ensureProperties();
+      props.set('axis', { type: 'token', value } as any);
+      return recreatePrimitiveGeometry(node.typeName!);
+    }
 
     return false;
   }
@@ -1035,11 +1205,25 @@ export function createViewerCore(opts: {
         }
       }
 
+      // Extract axis token
+      const extractAxis = (propName: string): string | null => {
+        const prop = prim.properties?.get(propName);
+        const dv = prop?.defaultValue;
+        if (typeof dv === 'string') return dv;
+        if (dv && typeof dv === 'object' && 'type' in dv && dv.type === 'token') {
+          return dv.value as string;
+        }
+        return null;
+      };
+      
       // Light-specific editable properties
       const typeName = node.typeName;
-      if (typeName === 'DistantLight' || typeName === 'SphereLight' || typeName === 'RectAreaLight' || typeName === 'DomeLight') {
+      if (typeName === 'DistantLight' || typeName === 'SphereLight' || typeName === 'RectLight' || typeName === 'RectAreaLight' || typeName === 'DomeLight') {
         const intensity = extractNumber('intensity');
         if (intensity !== null) result['_intensity'] = intensity;
+        
+        const exposure = extractNumber('exposure');
+        if (exposure !== null) result['_exposure'] = exposure;
 
         const color = extractColor('color');
         if (color) result['_color'] = color;
@@ -1052,14 +1236,57 @@ export function createViewerCore(opts: {
         if (typeName === 'SphereLight') {
           const radius = extractNumber('radius');
           if (radius !== null) result['_radius'] = radius;
+          // Spotlight shaping properties
+          const coneAngle = extractNumber('shaping:cone:angle');
+          if (coneAngle !== null) result['_shapingConeAngle'] = coneAngle;
+          const coneSoftness = extractNumber('shaping:cone:softness');
+          if (coneSoftness !== null) result['_shapingConeSoftness'] = coneSoftness;
         }
 
-        if (typeName === 'RectAreaLight') {
+        if (typeName === 'RectLight' || typeName === 'RectAreaLight') {
           const width = extractNumber('width');
           const height = extractNumber('height');
           if (width !== null) result['_width'] = width;
           if (height !== null) result['_height'] = height;
         }
+      }
+
+      // Basic primitive properties (Sphere, Cube, Cylinder, Cone, Capsule)
+      if (typeName === 'Sphere') {
+        const radius = extractNumber('radius');
+        result['_radius'] = radius ?? 1; // USD default is 1
+      }
+      
+      if (typeName === 'Cube') {
+        const size = extractNumber('size');
+        result['_size'] = size ?? 2; // USD default is 2
+      }
+      
+      if (typeName === 'Cylinder') {
+        const radius = extractNumber('radius');
+        const height = extractNumber('height');
+        const axis = extractAxis('axis');
+        result['_radius'] = radius ?? 1;
+        result['_height'] = height ?? 2;
+        result['_axis'] = axis ?? 'Y';
+      }
+      
+      if (typeName === 'Cone') {
+        const radius = extractNumber('radius');
+        const height = extractNumber('height');
+        const axis = extractAxis('axis');
+        result['_radius'] = radius ?? 1;
+        result['_height'] = height ?? 2;
+        result['_axis'] = axis ?? 'Y';
+      }
+      
+      if (typeName === 'Capsule') {
+        const radius = extractNumber('radius');
+        const height = extractNumber('height');
+        const axis = extractAxis('axis');
+        result['_radius'] = radius ?? 0.5;
+        result['_height'] = height ?? 1;
+        result['_axis'] = axis ?? 'Y';
       }
 
       // Mesh-specific editable properties

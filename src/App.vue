@@ -331,6 +331,78 @@
                         />
                       </div>
                     </div>
+                    <!-- Cube size -->
+                    <div v-if="selectedPrimProps._size !== undefined" class="property-row">
+                      <div class="property-key">size:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._size"
+                          :minFractionDigits="1"
+                          :maxFractionDigits="2"
+                          :min="0.01"
+                          :step="0.1"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('size', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Axis (Cylinder/Cone/Capsule) -->
+                    <div v-if="selectedPrimProps._axis !== undefined" class="property-row">
+                      <div class="property-key">axis:</div>
+                      <div class="property-value">
+                        <Select
+                          :modelValue="selectedPrimProps._axis"
+                          :options="['X', 'Y', 'Z']"
+                          @update:modelValue="(v) => onPrimScalarEdit('axis', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Light exposure -->
+                    <div v-if="selectedPrimProps._exposure !== undefined" class="property-row">
+                      <div class="property-key">exposure:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._exposure"
+                          :minFractionDigits="1"
+                          :maxFractionDigits="2"
+                          :step="0.5"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('exposure', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Spotlight shaping cone angle -->
+                    <div v-if="selectedPrimProps._shapingConeAngle !== undefined" class="property-row">
+                      <div class="property-key">cone angle:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._shapingConeAngle"
+                          :minFractionDigits="1"
+                          :maxFractionDigits="1"
+                          :min="0"
+                          :max="180"
+                          :step="5"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('shaping:cone:angle', v)"
+                        />
+                      </div>
+                    </div>
+                    <!-- Spotlight shaping cone softness -->
+                    <div v-if="selectedPrimProps._shapingConeSoftness !== undefined" class="property-row">
+                      <div class="property-key">cone softness:</div>
+                      <div class="property-value">
+                        <InputNumber
+                          :modelValue="selectedPrimProps._shapingConeSoftness"
+                          :minFractionDigits="2"
+                          :maxFractionDigits="2"
+                          :min="0"
+                          :max="1"
+                          :step="0.05"
+                          mode="decimal"
+                          @update:modelValue="(v) => onPrimScalarEdit('shaping:cone:softness', v)"
+                        />
+                      </div>
+                    </div>
                     <!-- Mesh doubleSided -->
                     <div v-if="selectedPrimProps._doubleSided !== undefined" class="property-row">
                       <div class="property-key">doubleSided:</div>
