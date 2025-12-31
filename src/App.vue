@@ -91,6 +91,7 @@
             <Tab value="outliner">Outliner</Tab>
             <Tab value="status">Status</Tab>
             <Tab value="scene">Scene</Tab>
+            <Tab value="gpu">GPU</Tab>
           </TabList>
           <TabPanels>
           <TabPanel value="source">
@@ -558,7 +559,7 @@
                         <InputText
                           class="string-input"
                           :modelValue="prop.rawValue"
-                          @update:modelValue="(v) => onPropertyEdit(prop.path, v)"
+                          @update:modelValue="(v) => onPropertyEdit(prop.path, v ?? null)"
                         />
                       </div>
                     </template>
@@ -589,6 +590,107 @@
                 </div>
                 </div>
               </div>
+            </div>
+          </TabPanel>
+          <TabPanel value="gpu">
+            <div class="gpu-panel">
+              <div class="gpu-toolbar">
+                <button class="refresh-btn" @click="refreshGpuResources" title="Refresh GPU resources snapshot">↻ Refresh</button>
+              </div>
+
+              <div v-if="gpuInfo" class="gpu-scroll">
+                <div class="gpu-section">
+                  <div class="gpu-section-title">Renderer</div>
+                  <div class="gpu-kv">
+                    <div class="gpu-k">memory.textures</div><div class="gpu-v">{{ gpuInfo.renderer.memory.textures }}</div>
+                    <div class="gpu-k">memory.geometries</div><div class="gpu-v">{{ gpuInfo.renderer.memory.geometries }}</div>
+                    <div class="gpu-k">programs</div><div class="gpu-v">{{ gpuInfo.renderer.programs ?? 'n/a' }}</div>
+                    <div class="gpu-k">draw calls</div><div class="gpu-v">{{ gpuInfo.renderer.render.calls }}</div>
+                    <div class="gpu-k">triangles</div><div class="gpu-v">{{ gpuInfo.renderer.render.triangles }}</div>
+                  </div>
+                </div>
+
+                <div class="gpu-section">
+                  <div class="gpu-section-title">Textures (scene)</div>
+                  <div class="gpu-subtitle">
+                    {{ gpuInfo.textures.totalUnique }} unique, ~{{ formatBytes(gpuInfo.textures.totalEstimatedBytes) }}
+                  </div>
+                  <table class="gpu-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>WxH</th>
+                        <th>Est. size</th>
+                        <th>Source</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="t in gpuInfo.textures.list" :key="t.uuid">
+                        <td class="gpu-mono">{{ t.name }}</td>
+                        <td class="gpu-mono">{{ (t.width ?? '?') + '×' + (t.height ?? '?') }}</td>
+                        <td class="gpu-mono">{{ t.estimatedBytes != null ? formatBytes(t.estimatedBytes) : 'n/a' }}</td>
+                        <td class="gpu-mono gpu-ellipsis" :title="decodeProxyUrl(t.sourceUrl)">{{ decodeProxyUrl(t.sourceUrl) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="gpu-section">
+                  <div class="gpu-section-title">Geometries (scene)</div>
+                  <div class="gpu-subtitle">
+                    {{ gpuInfo.geometries.totalUnique }} unique, ~{{ formatBytes(gpuInfo.geometries.totalBytes) }}
+                  </div>
+                  <table class="gpu-table">
+                    <thead>
+                      <tr>
+                        <th>Name</th>
+                        <th>Attributes</th>
+                        <th>Index</th>
+                        <th>Total</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="g in gpuInfo.geometries.list" :key="g.uuid">
+                        <td class="gpu-mono">{{ g.name }}</td>
+                        <td class="gpu-mono">{{ formatBytes(g.attributesBytes) }}</td>
+                        <td class="gpu-mono">{{ formatBytes(g.indexBytes) }}</td>
+                        <td class="gpu-mono">{{ formatBytes(g.totalBytes) }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+
+                <div class="gpu-section">
+                  <div class="gpu-section-title">Texture cache (loader)</div>
+                  <div class="gpu-subtitle">{{ gpuInfo.textureCache.entries.length }} entries</div>
+                  <table class="gpu-table">
+                    <thead>
+                      <tr>
+                        <th>URL</th>
+                        <th>WxH</th>
+                        <th>Est. size</th>
+                        <th>Base req</th>
+                        <th>Clone req</th>
+                        <th>Stage</th>
+                        <th>Clones live</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      <tr v-for="e in gpuInfo.textureCache.entries" :key="e.cacheKey">
+                        <td class="gpu-mono gpu-ellipsis" :title="decodeProxyUrl(e.url)">{{ decodeProxyUrl(e.url) }}</td>
+                        <td class="gpu-mono">{{ (e.width ?? '?') + '×' + (e.height ?? '?') }}</td>
+                        <td class="gpu-mono">{{ e.estimatedBytes != null ? formatBytes(e.estimatedBytes) : 'n/a' }}</td>
+                        <td class="gpu-mono">{{ e.baseRequests }}</td>
+                        <td class="gpu-mono">{{ e.cloneRequests }}</td>
+                        <td class="gpu-mono">{{ e.progressiveStage ?? '-' }}</td>
+                        <td class="gpu-mono">{{ e.progressiveClonesLive ?? '-' }}</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+
+              <div v-else class="status">No GPU snapshot yet. Click Refresh.</div>
             </div>
           </TabPanel>
           </TabPanels>
@@ -649,6 +751,7 @@ import InputText from 'primevue/inputtext';
 
 import { CORPUS_GROUPS } from './corpusRegistry';
 import type { PrimeTreeNode, ViewerCore } from './viewerCore';
+import type { GpuResourcesInfo } from './viewerCore/types';
 import { createViewerCore } from './viewerCore';
 import MonacoEditor from './components/MonacoEditor.vue';
 
@@ -656,6 +759,25 @@ const viewportEl = ref<HTMLElement | null>(null);
 const core = ref<ViewerCore | null>(null);
 
 const headless = new URLSearchParams(window.location.search ?? '').get('headless') === '1';
+
+// Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+const USDDEBUG =
+  (() => {
+    try {
+      const q = new URLSearchParams(window.location.search ?? '');
+      if (q.get('usddebug') === '1') return true;
+      if (localStorage.getItem('usddebug') === '1') return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  })();
+
+const dbg = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.log(...args);
+};
 
 const status = ref('Ready');
 const sourceText = ref('');
@@ -737,6 +859,59 @@ const selectedThreeObjectProps = ref<Record<string, any> | null>(null);
 const selectedThreeObjectUuid = ref<string | null>(null);
 const selectedIsMaterial = ref(false);
 const selectedIsTexture = ref(false);
+
+const gpuInfo = ref<GpuResourcesInfo | null>(null);
+let gpuPollTimer: number | null = null;
+
+function formatBytes(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let v = n;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  const digits = i === 0 ? 0 : i === 1 ? 1 : 2;
+  return `${v.toFixed(digits)} ${units[i]}`;
+}
+
+function decodeProxyUrl(url: string | null | undefined): string {
+  if (!url) return '';
+  try {
+    const u = new URL(url, 'http://local/');
+    // Decode __usdjs_proxy URLs: extract and decode the 'url' parameter
+    if (u.pathname.includes('/__usdjs_proxy')) {
+      const innerUrl = u.searchParams.get('url');
+      if (innerUrl) {
+        try {
+          return decodeURIComponent(innerUrl);
+        } catch {
+          return innerUrl; // Return as-is if decode fails
+        }
+      }
+    }
+    // Decode __usdjs_corpus URLs: extract and decode the 'file' parameter
+    if (u.pathname.includes('/__usdjs_corpus')) {
+      const file = u.searchParams.get('file');
+      if (file) {
+        try {
+          return decodeURIComponent(file);
+        } catch {
+          return file; // Return as-is if decode fails
+        }
+      }
+    }
+  } catch {
+    // If URL parsing fails, return original
+  }
+  return url;
+}
+
+function refreshGpuResources() {
+  if (!core.value) return;
+  gpuInfo.value = core.value.getGpuResourcesInfo();
+}
 const sceneTreeRef = ref<InstanceType<typeof Tree> | null>(null);
 const selectedPrimProps = ref<Record<string, any> | null>(null);
 const selectedPrimPath = ref<string | null>(null);
@@ -934,7 +1109,7 @@ const flattenedProperties = computed(() => {
         if (VECTOR3_PROPS.has(key)) {
           result.push({
             path,
-            displayValue: `${value.x}, ${value.y}, ${value.z}`,
+            displayValue: `${(value as any).x}, ${(value as any).y}, ${(value as any).z}`,
             editable: true,
             isColor: false,
             isBool: false,
@@ -950,7 +1125,7 @@ const flattenedProperties = computed(() => {
           // For repeat/offset/center (texture), show as vector2 row
           result.push({
             path,
-            displayValue: `${value.x}, ${value.y}`,
+            displayValue: `${(value as any).x}, ${(value as any).y}`,
             editable: true,
             isColor: false,
             isBool: false,
@@ -1142,8 +1317,7 @@ async function run() {
   
   // Build tree immediately
   const treeData = c.getThreeSceneTree();
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Built tree with', treeData.length, 'roots:', treeData);
+  dbg('[Scene Tree] Built tree with', treeData.length, 'roots:', treeData);
   threeTreeNodes.value = treeData;
   // Clear selection when scene changes
   threeSelectionKeys.value = {};
@@ -1154,8 +1328,7 @@ async function run() {
   setTimeout(() => {
     const refreshedTree = c.getThreeSceneTree();
     threeTreeNodes.value = refreshedTree;
-    // eslint-disable-next-line no-console
-    console.log('[Scene Tree] Refreshed tree after texture load delay');
+    dbg('[Scene Tree] Refreshed tree after texture load delay');
   }, 1500);
   // Update reference image URL after running
   referenceImageUrl.value = c.getReferenceImageUrl();
@@ -1169,7 +1342,7 @@ function onReferenceImageError() {
 }
 
 function resetToDefault() {
-  sourceText.value = cDefaultUsda();
+  sourceText.value = core.value?.getEmptyUsda() ?? '';
   entryKey.value = '<textarea>';
   selectionKeys.value = {};
   void run();
@@ -1243,10 +1416,32 @@ function refreshSceneTree() {
   if (!core.value) return;
   const refreshedTree = core.value.getThreeSceneTree();
   threeTreeNodes.value = refreshedTree;
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Manual refresh - found textures:', 
-    JSON.stringify(refreshedTree, (k, v) => k === 'children' && v ? `[${v.length} children]` : v, 2).slice(0, 500));
+  dbg(
+    '[Scene Tree] Manual refresh - found textures:',
+    JSON.stringify(refreshedTree, (k, v) => k === 'children' && v ? `[${v.length} children]` : v, 2).slice(0, 500),
+  );
 }
+
+// Poll GPU info only while the tab is visible.
+watch(activeTab, (tab) => {
+  if (gpuPollTimer != null) {
+    window.clearInterval(gpuPollTimer);
+    gpuPollTimer = null;
+  }
+  if (tab === 'gpu') {
+    refreshGpuResources();
+    gpuPollTimer = window.setInterval(() => {
+      refreshGpuResources();
+    }, 1500);
+  }
+});
+
+onBeforeUnmount(() => {
+  if (gpuPollTimer != null) {
+    window.clearInterval(gpuPollTimer);
+    gpuPollTimer = null;
+  }
+});
 
 function onThreeNodeSelect(e: any) {
   const node: PrimeTreeNode | undefined = e?.node;
@@ -1257,28 +1452,24 @@ function onThreeNodeSelect(e: any) {
   }
   const key = String(node.key);
   
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Node selected, key:', key, 'isTexture:', core.value.isTextureKey(key), 'isMaterial:', core.value.isMaterialKey(key));
+  dbg('[Scene Tree] Node selected, key:', key, 'isTexture:', core.value.isTextureKey(key), 'isMaterial:', core.value.isMaterialKey(key));
   
   let props: Record<string, any> | null = null;
   
   // Check if it's a texture node
   if (core.value.isTextureKey(key)) {
     props = core.value.getTextureProperties(key);
-    // eslint-disable-next-line no-console
-    console.log('[Scene Tree] Selected texture:', { key, propsFound: !!props, props });
+    dbg('[Scene Tree] Selected texture:', { key, propsFound: !!props, props });
   }
   // Check if it's a material node  
   else if (core.value.isMaterialKey(key)) {
     props = core.value.getMaterialProperties(key);
-    // eslint-disable-next-line no-console
-    console.log('[Scene Tree] Selected material:', { key, propsFound: !!props, props });
+    dbg('[Scene Tree] Selected material:', { key, propsFound: !!props, props });
   }
   // Regular object
   else {
     props = core.value.getThreeObjectProperties(key);
-    // eslint-disable-next-line no-console
-    console.log('[Scene Tree] Selected object:', { key, propsFound: !!props, props });
+    dbg('[Scene Tree] Selected object:', { key, propsFound: !!props, props });
   }
   
   selectedThreeObjectProps.value = props;
@@ -1291,27 +1482,23 @@ function onThreeNodeSelect(e: any) {
 }
 
 function scrollSelectedNodeIntoView(uuid: string) {
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Scrolling to selected node:', uuid);
+  dbg('[Scene Tree] Scrolling to selected node:', uuid);
   
   // Find the selected node in the tree by its data-key attribute or aria-selected
-  const treeEl = sceneTreeRef.value?.$el as HTMLElement | undefined;
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Tree element:', treeEl);
+  const treeEl = (sceneTreeRef.value as any)?.$el as HTMLElement | undefined;
+  dbg('[Scene Tree] Tree element:', treeEl);
   if (!treeEl) return;
   
   // PrimeVue Tree marks selected nodes with aria-selected="true" or p-tree-node-selected class
   const selectedNode = treeEl.querySelector('.p-tree-node-selected, [aria-selected="true"]') as HTMLElement | null;
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Found selected node:', selectedNode);
+  dbg('[Scene Tree] Found selected node:', selectedNode);
   if (selectedNode) {
     selectedNode.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   }
 }
 
 function onThreeNodeExpand(e: any) {
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Node expand event:', e);
+  dbg('[Scene Tree] Node expand event:', e);
   const node = e?.node;
   if (!node?.key) return;
   
@@ -1322,10 +1509,9 @@ function onThreeNodeExpand(e: any) {
 }
 
 function scrollToExpandedNodeChildren(nodeKey: string) {
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Scrolling to expanded node children:', nodeKey);
+  dbg('[Scene Tree] Scrolling to expanded node children:', nodeKey);
   
-  const treeEl = sceneTreeRef.value?.$el as HTMLElement | undefined;
+  const treeEl = (sceneTreeRef.value as any)?.$el as HTMLElement | undefined;
   if (!treeEl) return;
   
   // Find nodes and scroll the last visible one into view
@@ -1342,8 +1528,7 @@ function onPropertyEdit(path: string, newValue: string | boolean | number | null
   
   // Handle different value types
   const finalValue = typeof newValue === 'string' ? newValue.trim() : newValue;
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Editing property:', path, '=', finalValue, 'isTexture:', selectedIsTexture.value, 'isMaterial:', selectedIsMaterial.value);
+  dbg('[Scene Tree] Editing property:', path, '=', finalValue, 'isTexture:', selectedIsTexture.value, 'isMaterial:', selectedIsMaterial.value);
   
   let success: boolean;
   if (selectedIsTexture.value) {
@@ -1405,8 +1590,7 @@ function onViewportClickWithTabSwitch(e: MouseEvent) {
   const hitUuid = core.value.raycastAtNDC(ndcX, ndcY);
   
   if (hitUuid) {
-    // eslint-disable-next-line no-console
-    console.log('[Scene Pick] Hit object:', hitUuid);
+    dbg('[Scene Pick] Hit object:', hitUuid);
     
     // Switch to Scene tab
     activeTab.value = 'scene';
@@ -1489,8 +1673,7 @@ watch(selectionKeys, (newKeys) => {
 
 // Watch for scene tree selection changes
 watch(threeSelectionKeys, (newKeys) => {
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Selection keys changed:', newKeys);
+  dbg('[Scene Tree] Selection keys changed:', newKeys);
   const selectedKeys = Object.keys(newKeys).filter(k => newKeys[k]);
   if (selectedKeys.length > 0 && core.value) {
     const key = selectedKeys[0]!;
@@ -1504,16 +1687,13 @@ watch(threeSelectionKeys, (newKeys) => {
     let props: Record<string, any> | null;
     if (isTexture) {
       props = core.value.getTextureProperties(key);
-      // eslint-disable-next-line no-console
-      console.log('[Scene Tree] Loading texture props for:', key, props);
+      dbg('[Scene Tree] Loading texture props for:', key, props);
     } else if (isMaterial) {
       props = core.value.getMaterialProperties(key);
-      // eslint-disable-next-line no-console
-      console.log('[Scene Tree] Loading material props for:', key, props);
+      dbg('[Scene Tree] Loading material props for:', key, props);
     } else {
       props = core.value.getThreeObjectProperties(key);
-      // eslint-disable-next-line no-console
-      console.log('[Scene Tree] Loading object props for:', key, props);
+      dbg('[Scene Tree] Loading object props for:', key, props);
     }
     
     selectedThreeObjectProps.value = props;
@@ -1536,8 +1716,7 @@ let prevExpandedKeys: Record<string, boolean> = {};
 watch(threeExpandedKeys, (newKeys) => {
   // Find newly expanded keys
   const newlyExpanded = Object.keys(newKeys).filter(k => newKeys[k] && !prevExpandedKeys[k]);
-  // eslint-disable-next-line no-console
-  console.log('[Scene Tree] Expanded keys changed:', { newKeys, newlyExpanded });
+  dbg('[Scene Tree] Expanded keys changed:', { newKeys, newlyExpanded });
   
   if (newlyExpanded.length > 0) {
     // Scroll to show children of newly expanded node
@@ -1863,6 +2042,99 @@ onBeforeUnmount(() => {
   border-top: 1px solid #333;
   overflow: hidden;
   background: #1a1a1a;
+}
+
+.gpu-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.gpu-toolbar {
+  display: flex;
+  padding: 4px 8px;
+  background: #1a1a1a;
+  border-bottom: 1px solid #333;
+}
+
+.gpu-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 8px;
+}
+
+.gpu-section {
+  margin-bottom: 14px;
+  border: 1px solid #2a2a2a;
+  background: #121212;
+}
+
+.gpu-section-title {
+  font-size: 12px;
+  font-weight: 600;
+  padding: 8px 10px;
+  border-bottom: 1px solid #2a2a2a;
+  background: #171717;
+}
+
+.gpu-subtitle {
+  font-size: 11px;
+  color: #9a9a9a;
+  padding: 6px 10px;
+  border-bottom: 1px solid #222;
+}
+
+.gpu-kv {
+  display: grid;
+  grid-template-columns: 160px 1fr;
+  gap: 4px 10px;
+  padding: 10px;
+}
+
+.gpu-k {
+  color: #9a9a9a;
+  font-size: 11px;
+}
+
+.gpu-v {
+  color: #ddd;
+  font-size: 11px;
+}
+
+.gpu-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.gpu-table th,
+.gpu-table td {
+  padding: 6px 8px;
+  border-top: 1px solid #222;
+  vertical-align: top;
+}
+
+.gpu-table th {
+  text-align: left;
+  color: #bbb;
+  background: #141414;
+  position: sticky;
+  top: 0;
+  z-index: 1;
+}
+
+.gpu-mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+}
+
+.gpu-ellipsis {
+  max-width: 320px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .properties-header {

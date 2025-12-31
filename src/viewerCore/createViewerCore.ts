@@ -9,7 +9,7 @@ import { RectAreaLightUniformsLib } from 'three/examples/jsm/lights/RectAreaLigh
 import { UsdStage, type SdfPrimSpec, type SdfValue, resolveAssetPath } from '@cinevva/usdjs';
 
 import type { AnimatedObject, PrimeTreeNode, SceneNode, ThreeDebugInfo, ViewerCore } from './types';
-import { DEFAULT_USDA } from './constants';
+import { DEFAULT_USDA, EMPTY_USDA } from './constants';
 import { getPrimAnimationTimeRange, getPrimProp, getPrimPropAtTime, primHasAnimatedPoints, propHasAnimation, sdfToNumberTuple } from './usdAnim';
 import { findNearestSkelRootPrim, findPrimByPath } from './usdPaths';
 import { buildJointOrderIndexToBoneIndex, extractJointOrderNames } from './usdSkeleton';
@@ -27,6 +27,7 @@ import { applyCameraSettings as applyCameraSettingsExternal, frameToFit as frame
 import { applyRenderSettings as applyRenderSettingsExternal, ensurePost as ensurePostExternal } from './postprocessing';
 import { advanceAnimationPlayback, applyAnimatedObjectsAtTime } from './animationPlayback';
 import { getThreeDebugInfo as getThreeDebugInfoExternal } from './threeDebug';
+import { getGpuResourcesInfo as getGpuResourcesInfoExternal } from './gpuResources';
 import { buildThreeSceneTree, findObjectByUuid, getObjectProperties, setObjectProperty, EDITABLE_PROPERTIES, parseMaterialKey, findMaterialByKey, getMaterialProperties, setMaterialProperty, parseTextureKey, findTextureByKey, getTextureProperties, setTextureProperty } from './threeSceneTree';
 import { createDomeEnvironmentController } from './domeEnvironment';
 import { loadCorpusEntryExternal } from './corpusEntry';
@@ -210,9 +211,53 @@ export function createViewerCore(opts: {
 
   const camera = new THREE.PerspectiveCamera(60, 1, 0.1, 1_000_000);
   camera.position.set(80, 60, 120);
-  const controls = new OrbitControls(camera, renderer.domElement);
+  let controls = new OrbitControls(camera, renderer.domElement);
   controls.target.set(0, 15, 0);
   controls.update();
+
+  function recreateOrbitControls(): void {
+    // OrbitControls computes an internal basis quaternion in the constructor:
+    //   _quat = setFromUnitVectors(object.up, (0,1,0))
+    // If we change camera.up after construction (e.g. for Z-up stages), orbit/pan become incorrect.
+    // Recreate controls after updating camera.up so the internal basis is recomputed correctly.
+    const old = controls;
+    const oldTarget = old.target.clone();
+    const oldEnabled = old.enabled;
+    const oldEnableDamping = old.enableDamping;
+    const oldDampingFactor = old.dampingFactor;
+    const oldRotateSpeed = old.rotateSpeed;
+    const oldZoomSpeed = old.zoomSpeed;
+    const oldPanSpeed = old.panSpeed;
+    const oldScreenSpacePanning = old.screenSpacePanning;
+    const oldKeyPanSpeed = (old as any).keyPanSpeed;
+    const oldMinDistance = old.minDistance;
+    const oldMaxDistance = old.maxDistance;
+    const oldMinPolarAngle = old.minPolarAngle;
+    const oldMaxPolarAngle = old.maxPolarAngle;
+    const oldMinAzimuthAngle = old.minAzimuthAngle;
+    const oldMaxAzimuthAngle = old.maxAzimuthAngle;
+
+    old.dispose();
+
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.enabled = oldEnabled;
+    controls.enableDamping = oldEnableDamping;
+    controls.dampingFactor = oldDampingFactor;
+    controls.rotateSpeed = oldRotateSpeed;
+    controls.zoomSpeed = oldZoomSpeed;
+    controls.panSpeed = oldPanSpeed;
+    controls.screenSpacePanning = oldScreenSpacePanning;
+    if (typeof oldKeyPanSpeed === 'number') (controls as any).keyPanSpeed = oldKeyPanSpeed;
+    controls.minDistance = oldMinDistance;
+    controls.maxDistance = oldMaxDistance;
+    controls.minPolarAngle = oldMinPolarAngle;
+    controls.maxPolarAngle = oldMaxPolarAngle;
+    controls.minAzimuthAngle = oldMinAzimuthAngle;
+    controls.maxAzimuthAngle = oldMaxAzimuthAngle;
+
+    controls.target.copy(oldTarget);
+    controls.update();
+  }
 
   // Grid helper: render after content, enable z-test but disable z-write
   const gridHelper = new THREE.GridHelper(200, 20, 0x333333, 0x222222);
@@ -233,6 +278,8 @@ export function createViewerCore(opts: {
   // Axes helper: render last, enable z-test but disable z-write
   const axesHelper = new THREE.AxesHelper(20);
   axesHelper.name = 'AxesHelper';
+  // Always keep axes at world origin (do not follow orbit target).
+  axesHelper.position.set(0, 0, 0);
   axesHelper.renderOrder = 2; // Render last (after grid and content)
   axesHelper.traverse((child) => {
     const anyChild = child as any;
@@ -283,6 +330,55 @@ export function createViewerCore(opts: {
   const contentRoot = new THREE.Object3D();
   scene.add(contentRoot);
 
+  // Stage configuration
+  // Three.js defaults to Y-up, but USD stages can be authored Y-up or Z-up (and sometimes X-up).
+  // We keep geometry in authored coordinates and adapt camera controls + helpers (grid) to the stage's up axis.
+  let stageUpAxis: 'X' | 'Y' | 'Z' = 'Y';
+  function setStageUpAxis(axis: string) {
+    const a = (typeof axis === 'string' ? axis.toUpperCase() : '') as string;
+    const nextAxis: 'X' | 'Y' | 'Z' = (a === 'X' || a === 'Y' || a === 'Z' ? (a as any) : 'Y');
+
+    // IMPORTANT: OrbitControls can support arbitrary up vectors, but if we only change `camera.up`
+    // we can end up with a "rolled" camera (especially when switching Y-up <-> Z-up). That roll
+    // makes orbit/pan feel broken. So we rotate the camera *around the current target* to align
+    // the old up direction to the new one while preserving view direction.
+    const oldUp = camera.up.clone().normalize();
+    const newUp =
+      nextAxis === 'X'
+        ? new THREE.Vector3(1, 0, 0)
+        : nextAxis === 'Z'
+          ? new THREE.Vector3(0, 0, 1)
+          : new THREE.Vector3(0, 1, 0);
+
+    // Only do the expensive reorientation when the up direction actually changes.
+    if (oldUp.distanceTo(newUp) > 1e-6) {
+      const q = new THREE.Quaternion().setFromUnitVectors(oldUp, newUp);
+      const target = controls.target.clone();
+      const offset = camera.position.clone().sub(target);
+      offset.applyQuaternion(q);
+      camera.up.copy(newUp);
+      camera.position.copy(target).add(offset);
+      camera.lookAt(target);
+    } else {
+      camera.up.copy(newUp);
+    }
+
+    stageUpAxis = nextAxis;
+
+    // Critical: OrbitControls caches a basis quaternion derived from object.up at construction time.
+    // After changing camera.up, we must recreate controls so orbit/pan behave correctly in Z-up/X-up worlds.
+    recreateOrbitControls();
+
+    // Grid helper plane: Three's GridHelper is XZ by default (normal +Y).
+    // For Z-up stages, show XY "ground". For X-up stages, show YZ "ground".
+    gridHelper.rotation.set(0, 0, 0);
+    if (stageUpAxis === 'Z') gridHelper.rotation.x = Math.PI / 2;
+    else if (stageUpAxis === 'X') gridHelper.rotation.z = -Math.PI / 2;
+
+    // Ensure OrbitControls recomputes internal state after up changes.
+    controls.update();
+  }
+
   // Some Three.js helpers (e.g. PointLightHelper/SpotLightHelper) require manual update after transforms change.
   const dynamicHelperUpdates: Array<() => void> = [];
 
@@ -304,8 +400,7 @@ export function createViewerCore(opts: {
   let raf = 0;
   function renderLoop(timestamp: number) {
     controls.update();
-    // Keep the axes + labels near the current orbit focus.
-    axesHelper.position.copy(controls.target);
+    // Axes helper is pinned to world origin (0,0,0).
 
     // Keep axis label sprites at a consistent on-screen size (in pixels).
     // Labels are children of axesHelper, so positions are in local coordinates.
@@ -397,16 +492,42 @@ export function createViewerCore(opts: {
     });
 
   // Default camera position and target
-  const DEFAULT_CAMERA_POSITION = { x: 80, y: 60, z: 120 };
-  const DEFAULT_CAMERA_TARGET = { x: 0, y: 15, z: 0 };
+  // These are expressed in "viewer coordinates", so we adapt them to the stage up axis.
+  const DEFAULT_CAMERA_DISTANCE = { x: 80, up: 60, depth: 120 };
+  const DEFAULT_CAMERA_TARGET_UP = 15;
+
+  function getDefaultCameraPoseForUpAxis(axis: 'X' | 'Y' | 'Z') {
+    // Keep the same "feel" as the Y-up default: (x=80, up=60, depth=120).
+    // We treat "depth" as the axis that isn't X or Up.
+    if (axis === 'Z') {
+      // Up is Z, depth is Y
+      return {
+        pos: { x: DEFAULT_CAMERA_DISTANCE.x, y: DEFAULT_CAMERA_DISTANCE.depth, z: DEFAULT_CAMERA_DISTANCE.up },
+        target: { x: 0, y: 0, z: DEFAULT_CAMERA_TARGET_UP },
+      };
+    }
+    if (axis === 'X') {
+      // Up is X, depth is Z
+      return {
+        pos: { x: DEFAULT_CAMERA_DISTANCE.up, y: DEFAULT_CAMERA_DISTANCE.x, z: DEFAULT_CAMERA_DISTANCE.depth },
+        target: { x: DEFAULT_CAMERA_TARGET_UP, y: 0, z: 0 },
+      };
+    }
+    // Y-up
+    return {
+      pos: { x: DEFAULT_CAMERA_DISTANCE.x, y: DEFAULT_CAMERA_DISTANCE.up, z: DEFAULT_CAMERA_DISTANCE.depth },
+      target: { x: 0, y: DEFAULT_CAMERA_TARGET_UP, z: 0 },
+    };
+  }
 
   function resetCameraToDefault() {
-    camera.position.set(DEFAULT_CAMERA_POSITION.x, DEFAULT_CAMERA_POSITION.y, DEFAULT_CAMERA_POSITION.z);
-    controls.target.set(DEFAULT_CAMERA_TARGET.x, DEFAULT_CAMERA_TARGET.y, DEFAULT_CAMERA_TARGET.z);
+    const p = getDefaultCameraPoseForUpAxis(stageUpAxis);
+    camera.position.set(p.pos.x, p.pos.y, p.pos.z);
+    controls.target.set(p.target.x, p.target.y, p.target.z);
     controls.update();
   }
 
-  const frameToFit = () => frameToFitExternal({ scene, contentRoot, camera, controls });
+  const frameToFit = () => frameToFitExternal({ scene, contentRoot, camera, controls, upAxis: stageUpAxis });
 
   const applyCameraSettings = (layer: any): boolean =>
     applyCameraSettingsExternal({ layer, camera, controls, stageUnitScale });
@@ -953,6 +1074,7 @@ export function createViewerCore(opts: {
     getCurrentIdentifier: () => currentIdentifier,
     setStageUnitScale: (s) => (stageUnitScale = s),
     getStageUnitScale: () => stageUnitScale,
+    setStageUpAxis,
     domeEnvResetForNewSample: () => domeEnv.resetForNewSample(),
     applyCameraSettings,
     applyRenderSettings,
@@ -1018,6 +1140,7 @@ export function createViewerCore(opts: {
 
   return {
     getDefaultUsda: () => DEFAULT_USDA,
+    getEmptyUsda: () => EMPTY_USDA,
     getEntryKey: () => entryKey,
     getCompose: () => compose,
     getEntryOptions,
@@ -1058,6 +1181,10 @@ export function createViewerCore(opts: {
 
     getThreeDebugInfo: () => {
       return getThreeDebugInfoExternal({ contentRoot, renderer, scene, camera, controls });
+    },
+
+    getGpuResourcesInfo: () => {
+      return getGpuResourcesInfoExternal({ renderer, scene });
     },
 
     getThreeSceneTree: () => {

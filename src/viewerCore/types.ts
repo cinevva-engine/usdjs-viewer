@@ -7,8 +7,11 @@ export type PrimeTreeNode = {
     children?: PrimeTreeNode[];
     styleClass?: string;
     data?: {
-        path: string;
+        // USD Outliner nodes use `path`/`typeName`.
+        // Three.js Scene Tree nodes use custom flags (isTexture/isMaterial/...) and keys.
+        path?: string;
         typeName?: string;
+        [key: string]: any;
     };
 };
 
@@ -68,12 +71,69 @@ export type ThreeDebugInfo = {
     };
 };
 
+export type TextureCacheEntryInfo = {
+    cacheKey: string;
+    url: string;
+    baseRequests: number;
+    cloneRequests: number;
+    progressiveStage: 'init' | 'preview' | 'full' | 'failed' | null;
+    progressiveClonesLive: number | null;
+    resolved: boolean;
+    baseId: number | null;
+    width: number | null;
+    height: number | null;
+    estimatedBytes: number | null;
+};
+
+export type GpuResourcesInfo = {
+    renderer: {
+        memory: {
+            textures: number;
+            geometries: number;
+        };
+        render: {
+            calls: number;
+            triangles: number;
+            points: number;
+            lines: number;
+        };
+        programs: number | null;
+    };
+    textures: {
+        totalUnique: number;
+        totalEstimatedBytes: number;
+        list: Array<{
+            uuid: string;
+            name: string;
+            width: number | null;
+            height: number | null;
+            estimatedBytes: number | null;
+            sourceUrl: string | null;
+        }>;
+    };
+    geometries: {
+        totalUnique: number;
+        totalBytes: number;
+        list: Array<{
+            uuid: string;
+            name: string;
+            attributesBytes: number;
+            indexBytes: number;
+            totalBytes: number;
+        }>;
+    };
+    textureCache: {
+        entries: TextureCacheEntryInfo[];
+    };
+};
+
 export type AnimatedObject =
     | { kind: 'xform'; obj: THREE.Object3D; prim: SdfPrimSpec; unitScale: number }
     | { kind: 'points'; geoms: THREE.BufferGeometry[]; prim: SdfPrimSpec; unitScale: number };
 
 export type ViewerCore = {
     getDefaultUsda(): string;
+    getEmptyUsda(): string;
     getEntryKey(): string;
     getCompose(): boolean;
     getEntryOptions(): Array<{ label: string; value: string }>;
@@ -105,6 +165,8 @@ export type ViewerCore = {
 
     // Debugging / introspection (for diagnosing "empty scene" vs "rendered but invisible")
     getThreeDebugInfo(): ThreeDebugInfo;
+    // GPU resources inspector (textures, geometries, renderer memory stats, texture cache stats)
+    getGpuResourcesInfo(): GpuResourcesInfo;
 
     // Three.js scene tree (UI exploration / debugging)
     getThreeSceneTree(): PrimeTreeNode[];
@@ -129,7 +191,7 @@ export type ViewerCore = {
      * Returns the UUID of the first hit object, or null if nothing was hit.
      */
     raycastAtNDC(ndcX: number, ndcY: number): string | null;
-    
+
     /**
      * Get the ancestor UUIDs of an object (from root to parent, excluding the object itself).
      * Useful for expanding tree nodes to reveal a selected object.
