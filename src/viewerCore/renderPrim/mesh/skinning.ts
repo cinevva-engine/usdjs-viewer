@@ -5,6 +5,23 @@ import type { SceneNode } from '../../types';
 import { findNearestSkelRootPrim, findPrimByPath } from '../../usdPaths';
 import { buildJointOrderIndexToBoneIndex, extractJointOrderNames } from '../../usdSkeleton';
 import { getPropMetadataNumber, parseNumberArray } from '../../usdParse';
+import { parseMatrix4d } from '../../threeXform';
+
+// Baseline mode: get correct static deformation in rest/original pose first.
+// (We’ll re-enable animation once bind-space is verified.)
+const ENABLE_USD_SKEL_ANIM = false;
+
+type PendingSkinnedMesh = {
+    container: THREE.Object3D;
+    placeholder: THREE.Object3D;
+    geom: THREE.BufferGeometry;
+    mat: THREE.Material;
+    skelSkeletonPath: string;
+    jointIndices: ArrayLike<number>;
+    jointWeights: ArrayLike<number>;
+    elementSize: number;
+    jointOrderNames: string[] | null;
+};
 
 export function renderUsdSkinnedMesh(opts: {
     container: THREE.Object3D;
@@ -68,6 +85,13 @@ export function renderUsdSkinnedMesh(opts: {
     const skeleton = skelContainer ? (skelContainer as any).__usdSkeleton as THREE.Skeleton | undefined : undefined;
     const jointNames = skelContainer ? (skelContainer as any).__usdJointNames as string[] | undefined : undefined;
 
+    // Compute joint order now (independent of whether the Skeleton has been rendered yet).
+    const skelRootPrim = findNearestSkelRootPrim(rootPrim, node.path);
+    const jointOrderNames =
+        extractJointOrderNames(skelRootPrim) ??
+        extractJointOrderNames(node.prim) ??
+        extractJointOrderNames(skelPrim);
+
     if (skeleton && jointIndices && jointWeights && jointNames) {
         if (USDDEBUG) dbg(`[Mesh] ${node.path}: Found skeleton with ${skeleton.bones.length} bones`);
 
@@ -85,11 +109,6 @@ export function renderUsdSkinnedMesh(opts: {
 
         // USD joint indices are indexed in skel:jointOrder space (when authored). Remap them to
         // the skeleton's joint order so the correct bones influence vertices.
-        const skelRootPrim = findNearestSkelRootPrim(rootPrim, node.path);
-        const jointOrderNames =
-            extractJointOrderNames(skelRootPrim) ??
-            extractJointOrderNames(node.prim) ??
-            extractJointOrderNames(skelPrim);
         const jointIndexRemap = buildJointOrderIndexToBoneIndex(jointNames, jointOrderNames);
 
         // USD joint indices are stored with elementSize per vertex (original points)
@@ -146,11 +165,24 @@ export function renderUsdSkinnedMesh(opts: {
         // Important: use the ORIGINAL bones, not clones, because skeleton.bones references them
         const skelRoot = skelContainer?.children.find(c => c.name.includes('skeleton_root'));
         if (skelRoot) {
+            // Read skel:geomBindTransform if present
+            const geomBindTransformProp = node.prim.properties?.get('skel:geomBindTransform');
+            const geomBindTransform = parseMatrix4d(geomBindTransformProp?.defaultValue);
+            
             // Do NOT reparent bones under the mesh; it changes bone world transforms and can distort skinning.
-            // Bind using the mesh's current world matrix so bind space matches the scene graph.
             skinnedMesh.updateMatrixWorld(true);
             skelRoot.updateMatrixWorld(true);
-            skinnedMesh.bind(skeleton, skinnedMesh.matrixWorld.clone());
+            
+            // USD uses geomBindTransform to transform mesh vertices to skeleton space before skinning
+            // If not present, use identity (mesh is assumed to be in skeleton space)
+            let bindMatrix: THREE.Matrix4;
+            if (geomBindTransform) {
+                bindMatrix = geomBindTransform.clone();
+            } else {
+                // Default: identity (mesh is in skeleton space)
+                bindMatrix = new THREE.Matrix4();
+            }
+            skinnedMesh.bind(skeleton, bindMatrix);
             if (USDDEBUG) dbg(`[Mesh] ${node.path}: Bound SkinnedMesh to skeleton, bones:`, skeleton.bones.length);
 
             // Debug: log skinning attributes
@@ -225,112 +257,39 @@ export function renderUsdSkinnedMesh(opts: {
                 }
             }
 
-            // Check for animation source and apply rotations
-            // First check mesh's skel:animationSource, then fallback to skeleton's
-            const meshAnimSourceRel = node.prim.properties?.get('skel:animationSource');
-            const meshAnimSourceVal: any = meshAnimSourceRel?.defaultValue;
-            const skelAnimSourceVal: any = skelPrim?.properties?.get('skel:animationSource')?.defaultValue;
-
-            // Helper to extract path from sdfpath or string
-            const getPath = (val: any): string | null => {
-                if (val && typeof val === 'object' && val.type === 'sdfpath') return val.value as string;
-                if (typeof val === 'string') return val;
-                return null;
-            };
-
-            // Try mesh's animation source first, then skeleton's (verify prim exists)
-            let animPrim: SdfPrimSpec | null = null;
-            for (const val of [meshAnimSourceVal, skelAnimSourceVal]) {
-                const path = getPath(val);
-                if (path) {
-                    const prim = findPrimByPath(rootPrim, path);
-                    if (prim) {
-                        animPrim = prim;
-                        if (USDDEBUG) dbg(`[Mesh] ${node.path}: Found animation at ${path}`);
-                        break;
-                    }
-                }
-            }
-
-            if (animPrim) {
-                // Parse SkelAnimation rotations
-                const rotationsProp = animPrim.properties?.get('rotations');
-                const rotationsVal = rotationsProp?.defaultValue;
-                if (rotationsVal && typeof rotationsVal === 'object') {
-                    // Fast path: packed typed array (flat wxyz...)
-                    if ((rotationsVal as any).type === 'typedArray' && ((rotationsVal as any).elementType === 'quatf' || (rotationsVal as any).elementType === 'quatd' || (rotationsVal as any).elementType === 'quath')) {
-                        const data: any = (rotationsVal as any).value;
-                        if ((data instanceof Float32Array) || (data instanceof Float64Array)) {
-                            const count = Math.floor(data.length / 4);
-                            if (USDDEBUG) dbg(`[Mesh] ${node.path}: Found SkelAnimation with ${count} rotations (packed)`);
-                            for (let i = 0; i < count && i < skeleton.bones.length; i++) {
-                                const w = data[i * 4 + 0]!, x = data[i * 4 + 1]!, y = data[i * 4 + 2]!, z = data[i * 4 + 3]!;
-                                if (Number.isFinite(w) && Number.isFinite(x) && Number.isFinite(y) && Number.isFinite(z)) {
-                                    skeleton.bones[i]!.quaternion.set(x, y, z, w);
-                                    skeleton.bones[i]!.updateMatrix();
-                                }
-                            }
-                        }
-                    } else if ((rotationsVal as any).type === 'array') {
-                        const rotations = (rotationsVal as any).value;
-                        if (USDDEBUG) dbg(`[Mesh] ${node.path}: Found SkelAnimation with ${rotations.length} rotations`);
-
-                        // Apply rotations to bones
-                        for (let i = 0; i < rotations.length && i < skeleton.bones.length; i++) {
-                            const rot = rotations[i];
-                            if (rot && rot.type === 'tuple' && rot.value.length >= 4) {
-                                // USD quaternions are stored as (w, x, y, z), Three.js expects (x, y, z, w)
-                                const [w, x, y, z] = rot.value;
-                                skeleton.bones[i]!.quaternion.set(x, y, z, w);
-                                skeleton.bones[i]!.updateMatrix();
-                                if (USDDEBUG) dbg(`[Mesh] Bone ${skeleton.bones[i]!.name} rotation: (${x}, ${y}, ${z}, ${w})`);
-                            }
-                        }
-                    }
-
-                    // Traverse bone hierarchy to update world matrices (starting from root bone)
-                    // skelRoot contains all bones, so we traverse from there
-                    skelRoot.updateMatrixWorld(true);
-
-                    // Update skeleton's bone matrices for skinning
-                    skeleton.update();
-
-                    // Debug: log bone world positions after animation
-                    for (const bone of skeleton.bones) {
-                        const worldPos = new THREE.Vector3();
-                        bone.getWorldPosition(worldPos);
-                        if (USDDEBUG) dbg(`[Mesh] Bone ${bone.name} worldPos after anim:`, worldPos.toArray());
-                    }
-
-                    // Debug: log bone matrices from skeleton (these are what's used for skinning)
-                    if (USDDEBUG) dbg(`[Mesh] ${node.path}: skeleton.boneMatrices length:`, skeleton.boneMatrices?.length);
-                    if (skeleton.boneMatrices) {
-                        for (let i = 0; i < skeleton.bones.length; i++) {
-                            const mat = new THREE.Matrix4();
-                            mat.fromArray(skeleton.boneMatrices, i * 16);
-                            const pos = new THREE.Vector3();
-                            const rot = new THREE.Quaternion();
-                            const scale = new THREE.Vector3();
-                            mat.decompose(pos, rot, scale);
-                            if (USDDEBUG) {
-                                dbg(
-                                    `[Mesh] Bone matrix ${i} (${skeleton.bones[i]!.name}): pos=(${pos.x.toFixed(3)}, ${pos.y.toFixed(3)}, ${pos.z.toFixed(3)}), rot=(${rot.x.toFixed(3)}, ${rot.y.toFixed(3)}, ${rot.z.toFixed(3)}, ${rot.w.toFixed(3)})`,
-                                );
-                            }
-                        }
-                    }
-                }
+            if (ENABLE_USD_SKEL_ANIM) {
+                // (intentionally disabled for now — baseline first)
             }
         } else {
             console.warn(`[Mesh] ${node.path}: Could not find skeleton_root`);
         }
 
     } else {
+        // Skeleton may not have been rendered yet due to traversal order.
+        // Create a regular Mesh placeholder now and defer actual SkinnedMesh creation/binding until the Skeleton prim shows up.
         console.warn(`[Mesh] ${node.path}: Could not find skeleton for ${skelSkeletonPath}`);
-        const mesh = new THREE.Mesh(realGeom, mat);
-        mesh.castShadow = true;
-        mesh.receiveShadow = true;
-        container.add(mesh);
+
+        const placeholder = new THREE.Mesh(realGeom, mat);
+        placeholder.castShadow = true;
+        placeholder.receiveShadow = true;
+        placeholder.name = node.path;
+        container.add(placeholder);
+
+        const pendingMap: Map<string, PendingSkinnedMesh[]> =
+            ((sceneRef as any).__usdPendingSkins ??= new Map());
+        const arr = pendingMap.get(skelSkeletonPath) ?? [];
+        arr.push({
+            container,
+            placeholder,
+            geom: realGeom,
+            mat,
+            skelSkeletonPath,
+            jointIndices: jointIndices ?? new Uint16Array(),
+            jointWeights: jointWeights ?? new Float32Array(),
+            elementSize,
+            jointOrderNames,
+        });
+        pendingMap.set(skelSkeletonPath, arr);
     }
 }
 
