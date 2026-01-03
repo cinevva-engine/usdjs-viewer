@@ -119,15 +119,31 @@ function setCachedConversion(cacheKey: string, usda: string): void {
     }
 }
 
+// Max output size for usdcat (100MB should be more than enough for any reasonable USD file)
+const MAX_USDCAT_OUTPUT_SIZE = 100 * 1024 * 1024;
+
+// Max input file size for usdcat conversion (skip conversion for very large files to avoid memory issues)
+// Files larger than this will be served as binary for native parsing
+const MAX_USDCAT_INPUT_SIZE = 50 * 1024 * 1024; // 50MB
+
 // Convert external USD file to USDA using usdcat (helper for proxy endpoint)
 async function convertExternalUsdToUsda(tmpFile: string, cacheKey: string, res: any): Promise<void> {
     return new Promise<void>((resolve, reject) => {
         const usdcat = spawn('usdcat', [tmpFile], { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stdout = '';
+        const stdoutChunks: Buffer[] = [];
+        let stdoutSize = 0;
         let stderr = '';
+        let killed = false;
 
-        usdcat.stdout.on('data', (chunk) => {
-            stdout += chunk.toString();
+        usdcat.stdout.on('data', (chunk: Buffer) => {
+            if (killed) return;
+            stdoutSize += chunk.length;
+            if (stdoutSize > MAX_USDCAT_OUTPUT_SIZE) {
+                killed = true;
+                usdcat.kill();
+                return;
+            }
+            stdoutChunks.push(chunk);
         });
 
         usdcat.stderr.on('data', (chunk) => {
@@ -139,6 +155,16 @@ async function convertExternalUsdToUsda(tmpFile: string, cacheKey: string, res: 
             try {
                 fs.unlinkSync(tmpFile);
             } catch { }
+
+            if (killed) {
+                res.statusCode = 413;
+                res.setHeader('content-type', 'text/plain; charset=utf-8');
+                res.end(`usdcat output exceeded ${MAX_USDCAT_OUTPUT_SIZE} bytes limit`);
+                reject(new Error('usdcat output too large'));
+                return;
+            }
+
+            const stdout = Buffer.concat(stdoutChunks).toString('utf8');
 
             if (code === 0 && stdout) {
                 // Defensive: usdcat output should be valid USDA. If we cache a truncated/corrupt
@@ -152,7 +178,7 @@ async function convertExternalUsdToUsda(tmpFile: string, cacheKey: string, res: 
                             res.setHeader('content-type', 'text/plain; charset=utf-8');
                             res.end(
                                 `usdcat produced invalid USDA (will not cache): ${parseErr?.message || parseErr}\n` +
-                                    `stderr:\n${stderr || ''}`
+                                `stderr:\n${stderr || ''}`
                             );
                             reject(parseErr);
                             return;
@@ -260,11 +286,20 @@ async function convertUsdToUsdaWithUsdcat(filePath: string, cacheKey: string): P
     // Perform conversion using usdcat
     return new Promise<string>((resolve, reject) => {
         const usdcat = spawn('usdcat', [filePath], { stdio: ['ignore', 'pipe', 'pipe'] });
-        let stdout = '';
+        const stdoutChunks: Buffer[] = [];
+        let stdoutSize = 0;
         let stderr = '';
+        let killed = false;
 
-        usdcat.stdout.on('data', (chunk) => {
-            stdout += chunk.toString();
+        usdcat.stdout.on('data', (chunk: Buffer) => {
+            if (killed) return;
+            stdoutSize += chunk.length;
+            if (stdoutSize > MAX_USDCAT_OUTPUT_SIZE) {
+                killed = true;
+                usdcat.kill();
+                return;
+            }
+            stdoutChunks.push(chunk);
         });
 
         usdcat.stderr.on('data', (chunk) => {
@@ -272,6 +307,11 @@ async function convertUsdToUsdaWithUsdcat(filePath: string, cacheKey: string): P
         });
 
         usdcat.on('close', (code) => {
+            if (killed) {
+                reject(new Error(`usdcat output exceeded ${MAX_USDCAT_OUTPUT_SIZE} bytes limit`));
+                return;
+            }
+            const stdout = Buffer.concat(stdoutChunks).toString('utf8');
             if (code === 0 && stdout) {
                 // Cache the result
                 setCachedConversion(cacheKey, stdout);
@@ -368,6 +408,17 @@ export default defineConfig({
                                 const isUsdz = data.length >= 4 && data[0] === 0x50 && data[1] === 0x4B;
 
                                 if (isUsdc || isUsdz) {
+                                    // For very large files, skip validation and conversion - serve as binary directly
+                                    // This avoids memory issues with 100MB+ USD files
+                                    if (buffer.length > MAX_USDCAT_INPUT_SIZE) {
+                                        console.log(`Large binary USD file (${(buffer.length / 1024 / 1024).toFixed(1)}MB), serving as binary: ${abs}`);
+                                        res.setHeader('content-type', isUsdz ? 'model/vnd.usdz+zip' : 'application/x-usdc');
+                                        res.setHeader('x-usd-format', isUsdz ? 'usdz' : 'usdc');
+                                        res.statusCode = 200;
+                                        res.end(buffer);
+                                        return;
+                                    }
+
                                     // Validate parsing works (but don't convert)
                                     const { parseUsdcToLayer, parseUsdzToLayer } = await import('@cinevva/usdjs');
                                     if (isUsdc) {

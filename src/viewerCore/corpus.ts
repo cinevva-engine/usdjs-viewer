@@ -37,11 +37,14 @@ export async function fetchCorpusFile(rel: string): Promise<string | ArrayBuffer
     const urlParams = new URLSearchParams(window.location.search);
     const usdcatFallback = urlParams.get('usdcat_fallback');
 
-    // Build URL with file parameter and optionally usdcat_fallback parameter
+    // Build URL with file parameter.
+    //
+    // IMPORTANT:
+    // - Our viewer supports native USDC/USDZ parsing, so for corpus files we want to fetch **binary** by default.
+    // - The dev server only serves binary when `usdcat_fallback=false`; otherwise it converts to USDA text.
+    // - Users can still force text conversion by adding `?usdcat_fallback=true` to the viewer URL.
     const params = new URLSearchParams({ file: rel });
-    if (usdcatFallback !== null) {
-        params.set('usdcat_fallback', usdcatFallback);
-    }
+    params.set('usdcat_fallback', usdcatFallback ?? 'false');
 
     const url = `/__usdjs_corpus?${params.toString()}`;
     const res = await fetch(url);

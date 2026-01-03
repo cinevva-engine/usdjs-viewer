@@ -55,6 +55,18 @@ export function getAssetResolutionIdentifier(opts: {
 }): string | undefined {
   const { rootPrim, prim, currentIdentifier } = opts;
 
+  const USDDEBUG = typeof window !== 'undefined' && (
+    new URLSearchParams(window.location.search).get('usddebug') === '1' ||
+    window.localStorage?.getItem?.('usddebug') === '1'
+  );
+
+  if (USDDEBUG) {
+    console.log('[TEXTURE:getAssetResolutionIdentifier] START', {
+      primPath: prim.path?.primPath,
+      currentIdentifier,
+    });
+  }
+
   // Find the reference root that contains this prim
   let cur = prim.path?.primPath ?? '';
   while (cur && cur !== '/') {
@@ -62,6 +74,12 @@ export function getAssetResolutionIdentifier(opts: {
     if (p?.metadata?.references) {
       // Extract the asset path from the reference metadata
       const refs = extractAssetStrings(p.metadata.references);
+      if (USDDEBUG) {
+        console.log('[TEXTURE:getAssetResolutionIdentifier] Found reference', {
+          path: cur,
+          references: refs,
+        });
+      }
       if (refs.length > 0) {
         // Resolve the reference asset path to get the full identifier
         const refAssetPath = refs[0];
@@ -69,8 +87,21 @@ export function getAssetResolutionIdentifier(opts: {
           // Resolve relative to the current identifier to get the full path
           const baseIdentifier = currentIdentifier ?? '<viewer>';
           const resolvedRef = resolveAssetPath(refAssetPath, baseIdentifier);
+          if (USDDEBUG) {
+            console.log('[TEXTURE:getAssetResolutionIdentifier] Resolved', {
+              refAssetPath,
+              baseIdentifier,
+              resolvedRef,
+            });
+          }
           return resolvedRef;
-        } catch {
+        } catch (err) {
+          if (USDDEBUG) {
+            console.warn('[TEXTURE:getAssetResolutionIdentifier] Resolution failed', {
+              refAssetPath,
+              err,
+            });
+          }
           return refAssetPath;
         }
       }
@@ -78,6 +109,10 @@ export function getAssetResolutionIdentifier(opts: {
     const parts = cur.split('/').filter(Boolean);
     parts.pop();
     cur = parts.length ? '/' + parts.join('/') : '/';
+  }
+  
+  if (USDDEBUG) {
+    console.log('[TEXTURE:getAssetResolutionIdentifier] No reference found, returning undefined');
   }
   return undefined;
 }
@@ -110,15 +145,44 @@ export function createResolveMaterial(opts: {
       );
     }
     const materialPrim = resolveMaterialBinding(prim, rootPrim, bindingRootForMaterials);
-    if (USDDEBUG) dbg(`[resolveMaterial]   materialPrim=${materialPrim?.path?.primPath ?? 'null'}`);
+    if (USDDEBUG) {
+      dbg(`[resolveMaterial]   materialPrim=${materialPrim?.path?.primPath ?? 'null'}`);
+      console.log('[TEXTURE:MaterialResolution] Material binding resolved', {
+        primPath: prim.path?.primPath,
+        materialPath: materialPrim?.path?.primPath,
+      });
+    }
     if (materialPrim) {
       const shaderPrim = resolveShaderFromMaterial(materialPrim, rootPrim);
-      if (USDDEBUG) dbg(`[resolveMaterial]   shaderPrim=${shaderPrim?.path?.primPath ?? 'null'}`);
+      if (USDDEBUG) {
+        dbg(`[resolveMaterial]   shaderPrim=${shaderPrim?.path?.primPath ?? 'null'}`);
+        console.log('[TEXTURE:MaterialResolution] Shader resolved', {
+          materialPath: materialPrim?.path?.primPath,
+          shaderPath: shaderPrim?.path?.primPath,
+        });
+      }
       if (shaderPrim) {
         // Get the identifier for resolving textures - use the reference root's identifier if available
         const baseIdentifier = currentIdentifier ?? '<viewer>';
         const assetIdentifier = getAssetResolutionIdentifier({ rootPrim, prim: shaderPrim, currentIdentifier }) ?? baseIdentifier;
-        const mat = createMaterialFromShader(shaderPrim, rootPrim, (path: string) => resolveAssetUrl?.(path, assetIdentifier) ?? null, materialPrim);
+        if (USDDEBUG) {
+          console.log('[TEXTURE:MaterialResolution] Asset identifier for textures', {
+            baseIdentifier,
+            assetIdentifier,
+            shaderPath: shaderPrim?.path?.primPath,
+          });
+        }
+        const mat = createMaterialFromShader(shaderPrim, rootPrim, (path: string) => {
+          const resolved = resolveAssetUrl?.(path, assetIdentifier) ?? null;
+          if (USDDEBUG && path) {
+            console.log('[TEXTURE:MaterialResolution] Resolving texture path', {
+              path,
+              assetIdentifier,
+              resolved,
+            });
+          }
+          return resolved;
+        }, materialPrim);
         // Debug: log material creation for UsdPreviewSurface samples
         const shaderType = shaderPrim.properties?.get('info:id')?.defaultValue;
         if (USDDEBUG) dbg(`[resolveMaterial]   shaderType=${shaderType}`);

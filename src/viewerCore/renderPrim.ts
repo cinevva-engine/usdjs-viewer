@@ -70,12 +70,13 @@ export function renderPrim(
 
   const container = new THREE.Object3D();
   container.name = node.path;
-  applyXformOps(container, node.prim, undefined, unitScale);
+  // Xform evaluation should not apply metersPerUnit scaling.
+  applyXformOps(container, node.prim, undefined, 1.0);
   objParent.add(container);
 
   // Track animated objects for animation playback
   if (animatedObjects && primHasAnimatedXform(node.prim)) {
-    animatedObjects.push({ kind: 'xform', obj: container, prim: node.prim, unitScale });
+    animatedObjects.push({ kind: 'xform', obj: container, prim: node.prim, unitScale: 1.0 });
   }
 
   const typeName = node.typeName ?? '';
@@ -228,6 +229,7 @@ export function renderPrim(
     container,
     helpersParent,
     helpers,
+    sceneRef,
     prim: node.prim,
     primPath: node.path,
     unitScale,

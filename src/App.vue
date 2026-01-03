@@ -625,7 +625,13 @@
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="t in gpuInfo.textures.list" :key="t.uuid">
+                      <tr 
+                        v-for="t in gpuInfo.textures.list" 
+                        :key="t.uuid"
+                        class="gpu-texture-row"
+                        @click="showTexturePreview(t)"
+                        title="Click to preview texture"
+                      >
                         <td class="gpu-mono">{{ t.name }}</td>
                         <td class="gpu-mono">{{ (t.width ?? '?') + '×' + (t.height ?? '?') }}</td>
                         <td class="gpu-mono">{{ t.estimatedBytes != null ? formatBytes(t.estimatedBytes) : 'n/a' }}</td>
@@ -676,7 +682,13 @@
                       </tr>
                     </thead>
                     <tbody>
-                      <tr v-for="e in gpuInfo.textureCache.entries" :key="e.cacheKey">
+                      <tr 
+                        v-for="e in gpuInfo.textureCache.entries" 
+                        :key="e.cacheKey"
+                        class="gpu-texture-row"
+                        @click="showTexturePreviewFromCache(e)"
+                        title="Click to preview texture"
+                      >
                         <td class="gpu-mono gpu-ellipsis" :title="decodeProxyUrl(e.url)">{{ decodeProxyUrl(e.url) }}</td>
                         <td class="gpu-mono">{{ (e.width ?? '?') + '×' + (e.height ?? '?') }}</td>
                         <td class="gpu-mono">{{ e.estimatedBytes != null ? formatBytes(e.estimatedBytes) : 'n/a' }}</td>
@@ -694,6 +706,26 @@
             </div>
           </TabPanel>
           </TabPanels>
+
+          <!-- Texture Preview Modal -->
+          <div v-if="previewTexture" class="texture-preview-modal" @click.self="closeTexturePreview">
+            <div class="texture-preview-modal-content">
+              <div class="texture-preview-modal-header">
+                <div class="texture-preview-modal-title">{{ previewTexture.name }}</div>
+                <button class="texture-preview-modal-close" @click="closeTexturePreview" title="Close">×</button>
+              </div>
+              <div class="texture-preview-modal-body">
+                <div v-if="previewTextureImageUrl" class="texture-preview-modal-image-container">
+                  <img :src="previewTextureImageUrl" alt="Texture preview" class="texture-preview-modal-img" />
+                  <div class="texture-preview-modal-info">
+                    {{ (previewTexture.width ?? '?') + '×' + (previewTexture.height ?? '?') }}
+                    <span v-if="previewTexture.sourceUrl" class="texture-preview-modal-url">{{ decodeProxyUrl(previewTexture.sourceUrl) }}</span>
+                  </div>
+                </div>
+                <div v-else class="texture-preview-modal-loading">Loading preview...</div>
+              </div>
+            </div>
+          </div>
         </Tabs>
       </div>
     </SplitterPanel>
@@ -734,6 +766,7 @@
 
 <script setup lang="ts">
 import { onMounted, onBeforeUnmount, ref, watch, computed, nextTick } from 'vue';
+import * as THREE from 'three';
 
 import Splitter from 'primevue/splitter';
 import SplitterPanel from 'primevue/splitterpanel';
@@ -863,6 +896,10 @@ const selectedIsTexture = ref(false);
 const gpuInfo = ref<GpuResourcesInfo | null>(null);
 let gpuPollTimer: number | null = null;
 
+// Texture preview popup state
+const previewTexture = ref<{ uuid: string; sourceUrl: string | null; width: number | null; height: number | null; name: string } | null>(null);
+const previewTextureImageUrl = ref<string | null>(null);
+
 function formatBytes(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return '0 B';
   const units = ['B', 'KB', 'MB', 'GB'];
@@ -911,6 +948,364 @@ function decodeProxyUrl(url: string | null | undefined): string {
 function refreshGpuResources() {
   if (!core.value) return;
   gpuInfo.value = core.value.getGpuResourcesInfo();
+}
+
+function findTextureByUuid(uuid: string): { textureKey: string; imageUrl: string | null; texture: any } | null {
+  if (!core.value) return null;
+  
+  // First, try to get texture object directly by UUID (new method)
+  let textureObj = core.value.findTextureByUuid?.(uuid);
+  
+  // If not found, also check scene.environment and scene.background directly
+  // (PMREM textures might be stored there)
+  if (!textureObj) {
+    // We can't directly access the scene, but we can check via getGpuResourcesInfo
+    // which has access to the scene
+    const gpuInfo = core.value.getGpuResourcesInfo();
+    // The texture should be in the textures list if it's in the scene
+    const texInList = gpuInfo.textures.list.find(t => t.uuid === uuid);
+    if (texInList) {
+      // Try finding it again now that we know it exists
+      textureObj = core.value.findTextureByUuid?.(uuid);
+    }
+  }
+  
+  // Search scene tree for texture with matching UUID to get properties
+  const sceneTree = core.value.getThreeSceneTree();
+  let foundKey: string | null = null;
+  let imageUrl: string | null = null;
+  
+  const searchTree = (nodes: any[]): void => {
+    for (const node of nodes) {
+      if (node.data?.isTexture && node.data?.textureUuid === uuid) {
+        foundKey = node.key;
+        // Get texture properties (includes data URLs from ImageBitmap/Canvas conversion)
+        const texProps = core.value?.getTextureProperties(node.key);
+        if (texProps?.imageUrl) {
+          imageUrl = texProps.imageUrl;
+        }
+        return;
+      }
+      if (node.children) {
+        searchTree(node.children);
+      }
+    }
+  };
+  
+  searchTree(sceneTree);
+  
+  console.log('[TexturePreview] findTextureByUuid result:', {
+    uuid,
+    foundTexture: !!textureObj,
+    foundKey,
+    imageUrl,
+    textureType: textureObj?.type,
+    textureIsCube: textureObj?.isCubeTexture
+  });
+  
+  return {
+    textureKey: foundKey || '',
+    imageUrl,
+    texture: textureObj || null
+  };
+}
+
+async function renderTextureToCanvas(texture: any, width: number, height: number): Promise<string | null> {
+  if (!texture) {
+    console.warn('[TexturePreview] No texture provided');
+    return null;
+  }
+  
+  if (!texture.isTexture && !texture.isCubeTexture) {
+    console.warn('[TexturePreview] Not a texture:', texture.type, texture);
+    return null;
+  }
+  
+  try {
+    // THREE is imported as a module
+    
+    // Check if it's a cube texture
+    // THREE.CubeTexture = 1016, but also check for isCubeTexture property and image array
+    const isCubeTexture = texture.isCubeTexture || 
+                          texture.type === THREE.CubeTexture ||
+                          texture.type === 1016 || // Direct check for CubeTexture type constant
+                          (texture.image && Array.isArray(texture.image) && texture.image.length === 6) ||
+                          (texture.constructor && texture.constructor.name === 'CubeTexture');
+    
+    console.log('[TexturePreview] Rendering texture:', {
+      isTexture: texture.isTexture,
+      isCubeTexture,
+      type: texture.type,
+      THREE_CubeTexture: THREE.CubeTexture,
+      typeMatches: texture.type === THREE.CubeTexture,
+      imageType: texture.image?.constructor?.name,
+      imageIsArray: Array.isArray(texture.image),
+      imageLength: texture.image?.length,
+      constructorName: texture.constructor?.name,
+      width,
+      height
+    });
+    
+    if (isCubeTexture) {
+      console.log('[TexturePreview] Cube texture preview not supported - PMREM textures are render targets tied to the main renderer context');
+      return null;
+    }
+    
+    // Regular 2D texture rendering
+    console.log('[TexturePreview] Rendering 2D texture');
+    const w = Math.max(1, width || texture.image?.width || 256);
+    const h = Math.max(1, height || texture.image?.height || 256);
+    
+    // Create a temporary canvas
+    const canvas = document.createElement('canvas');
+    canvas.width = w;
+    canvas.height = h;
+    
+    // Create a temporary WebGL renderer
+    const tempRenderer = new THREE.WebGLRenderer({ 
+      canvas,
+      antialias: false,
+      preserveDrawingBuffer: true 
+    });
+    tempRenderer.setSize(w, h, false);
+    
+    // Create a simple scene with a quad displaying the texture
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+    
+    // Create a plane geometry
+    const geometry = new THREE.PlaneGeometry(2, 2);
+    
+    // Create a material with the texture
+    const material = new THREE.MeshBasicMaterial({ 
+      map: texture,
+      side: THREE.DoubleSide
+    });
+    
+    const mesh = new THREE.Mesh(geometry, material);
+    scene.add(mesh);
+    
+    // Render to canvas
+    tempRenderer.render(scene, camera);
+    
+    // Wait a frame to ensure rendering completes
+    await new Promise(resolve => requestAnimationFrame(resolve));
+    
+    // Convert to data URL
+    const dataUrl = canvas.toDataURL('image/png');
+    if (!dataUrl || dataUrl === 'data:,') {
+      console.error('[TexturePreview] Failed to generate data URL from canvas');
+      geometry.dispose();
+      material.dispose();
+      tempRenderer.dispose();
+      return null;
+    }
+    console.log('[TexturePreview] 2D texture rendered, data URL length:', dataUrl.length);
+    
+    // Cleanup
+    geometry.dispose();
+    material.dispose();
+    tempRenderer.dispose();
+    
+    return dataUrl;
+  } catch (e) {
+    console.error('[TexturePreview] Failed to render texture to canvas:', e);
+    return null;
+  }
+}
+
+function showTexturePreview(texture: { uuid: string; sourceUrl: string | null; width: number | null; height: number | null; name: string }) {
+  previewTexture.value = texture;
+  previewTextureImageUrl.value = null;
+  
+  console.log('[TexturePreview] Showing preview for texture:', {
+    uuid: texture.uuid,
+    name: texture.name,
+    sourceUrl: texture.sourceUrl,
+    width: texture.width,
+    height: texture.height
+  });
+  
+  // Priority 1: Try to find texture by UUID and get imageUrl (includes data URLs from ImageBitmap/Canvas conversion)
+  const found = findTextureByUuid(texture.uuid);
+  console.log('[TexturePreview] Found texture result:', {
+    found: !!found,
+    textureKey: found?.textureKey,
+    imageUrl: found?.imageUrl,
+    hasTexture: !!found?.texture
+  });
+  
+  if (found?.imageUrl) {
+    console.log('[TexturePreview] Using imageUrl from texture properties');
+    previewTextureImageUrl.value = found.imageUrl;
+    return;
+  }
+  
+  // Priority 2: If sourceUrl is a data URL, use it directly
+  if (texture.sourceUrl && texture.sourceUrl.startsWith('data:')) {
+    console.log('[TexturePreview] Using data URL from sourceUrl');
+    previewTextureImageUrl.value = texture.sourceUrl;
+    return;
+  }
+  
+  // Priority 3: If sourceUrl looks like a valid image URL, use it
+  if (texture.sourceUrl) {
+    const url = texture.sourceUrl;
+    if (/\.(png|jpg|jpeg|gif|webp|exr|bmp|avif)(\?|#|$)/i.test(url)) {
+      console.log('[TexturePreview] Using image URL from sourceUrl');
+      previewTextureImageUrl.value = url;
+      return;
+    }
+    // Priority 4: For proxy/corpus URLs, try to use them directly (they should work as image sources)
+    console.log('[TexturePreview] Using proxy/corpus URL from sourceUrl');
+    previewTextureImageUrl.value = url;
+    return;
+  }
+  
+  // Priority 5: If no source URL, try to render the texture to a canvas
+  if (found?.texture) {
+    console.log('[TexturePreview] Found texture object, attempting to render:', {
+      uuid: found.texture.uuid,
+      type: found.texture.type,
+      isTexture: found.texture.isTexture,
+      isCubeTexture: found.texture.isCubeTexture,
+      width: texture.width,
+      height: texture.height,
+      imageWidth: found.texture.image?.width,
+      imageHeight: found.texture.image?.height,
+      imageType: found.texture.image?.constructor?.name
+    });
+    const w = texture.width || found.texture.image?.width || 256;
+    const h = texture.height || found.texture.image?.height || 256;
+    
+    // Render asynchronously
+    renderTextureToCanvas(found.texture, w, h).then((renderedDataUrl) => {
+      if (renderedDataUrl) {
+        console.log('[TexturePreview] Successfully rendered texture to data URL');
+        previewTextureImageUrl.value = renderedDataUrl;
+      } else {
+        console.warn('[TexturePreview] Failed to render texture to canvas - renderTextureToCanvas returned null');
+      }
+    }).catch((err) => {
+      console.error('[TexturePreview] Error rendering texture:', err);
+    });
+  } else {
+    console.warn('[TexturePreview] Texture object not found for UUID:', texture.uuid, 'Available methods:', {
+      hasFindTextureByUuid: typeof core.value?.findTextureByUuid === 'function'
+    });
+  }
+  
+  // If we still don't have an image URL, the preview will show "Loading preview..." message
+}
+
+function showTexturePreviewFromCache(entry: { url: string; width: number | null; height: number | null; cacheKey: string }) {
+  // Extract filename from URL for name
+  const decodedUrl = decodeProxyUrl(entry.url);
+  const filename = decodedUrl.split('/').pop()?.split('?')[0] || entry.cacheKey;
+  
+  previewTexture.value = {
+    uuid: entry.cacheKey,
+    sourceUrl: entry.url,
+    width: entry.width,
+    height: entry.height,
+    name: filename,
+  };
+  previewTextureImageUrl.value = null;
+  
+  if (!core.value) {
+    // Fallback: use URL directly
+    if (entry.url) {
+      previewTextureImageUrl.value = entry.url;
+    }
+    return;
+  }
+  
+  // Try to find the actual texture object from the cache entry
+  // Search scene tree for any texture that might match this cache entry
+  const sceneTree = core.value.getThreeSceneTree();
+  let foundTextureKey: string | null = null;
+  
+  const searchTree = (nodes: any[]): void => {
+    for (const node of nodes) {
+      if (node.data?.isTexture) {
+        // Get texture properties to check if it matches this cache entry
+        const texProps = core.value?.getTextureProperties(node.key);
+        if (texProps) {
+          // Check if this texture's source URL matches the cache entry URL
+          // or if dimensions match (heuristic)
+          const texSourceUrl = texProps.imageUrl || '';
+          if (texSourceUrl === entry.url || 
+              (texProps.imageWidth === entry.width && 
+               texProps.imageHeight === entry.height && 
+               entry.width !== null && entry.height !== null)) {
+            foundTextureKey = node.key;
+            // If we found a data URL, use it immediately
+            if (texProps.imageUrl && texProps.imageUrl.startsWith('data:')) {
+              previewTextureImageUrl.value = texProps.imageUrl;
+              return;
+            }
+          }
+        }
+      }
+      if (node.children) {
+        searchTree(node.children);
+      }
+    }
+  };
+  searchTree(sceneTree);
+  
+  // If we found a texture key, get its properties (may have data URL)
+  if (foundTextureKey && !previewTextureImageUrl.value) {
+    const texProps = core.value.getTextureProperties(foundTextureKey);
+    if (texProps?.imageUrl) {
+      previewTextureImageUrl.value = texProps.imageUrl;
+      return;
+    }
+  }
+  
+  // Fallback: use URL directly (works for proxy/corpus URLs and data URLs)
+  if (entry.url) {
+    previewTextureImageUrl.value = entry.url;
+    return;
+  }
+  
+  // If no URL, try to find texture by dimensions and render it
+  if (entry.width && entry.height) {
+    // Search for texture with matching dimensions
+    const sceneTree = core.value.getThreeSceneTree();
+    const searchForTexture = (nodes: any[]): any => {
+      for (const node of nodes) {
+        if (node.data?.isTexture) {
+          const texProps = core.value?.getTextureProperties(node.key);
+          if (texProps?.imageWidth === entry.width && 
+              texProps?.imageHeight === entry.height &&
+              !texProps?.imageUrl) {
+            // Found texture with matching dimensions and no imageUrl - try to render it
+            const textureObj = core.value.findTextureByUuid?.(node.data.textureUuid);
+            if (textureObj) {
+              renderTextureToCanvas(textureObj, entry.width || 256, entry.height || 256).then((renderedDataUrl) => {
+                if (renderedDataUrl) {
+                  previewTextureImageUrl.value = renderedDataUrl;
+                }
+              }).catch((err) => {
+                console.error('[TexturePreview] Error rendering cache texture:', err);
+              });
+              return; // Exit early since we're rendering async
+            }
+          }
+        }
+        if (node.children) {
+          searchForTexture(node.children);
+        }
+      }
+    };
+    searchForTexture(sceneTree);
+  }
+}
+
+function closeTexturePreview() {
+  previewTexture.value = null;
+  previewTextureImageUrl.value = null;
 }
 const sceneTreeRef = ref<InstanceType<typeof Tree> | null>(null);
 const selectedPrimProps = ref<Record<string, any> | null>(null);
@@ -2135,6 +2530,137 @@ onBeforeUnmount(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.gpu-texture-row {
+  cursor: pointer;
+  transition: background-color 0.15s;
+}
+
+.gpu-texture-row:hover {
+  background-color: #1a1a1a;
+}
+
+/* Texture Preview Modal */
+.texture-preview-modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.85);
+  backdrop-filter: blur(4px);
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 20px;
+}
+
+.texture-preview-modal-content {
+  background: #1a1a1a;
+  border: 1px solid #333;
+  border-radius: 8px;
+  max-width: 90vw;
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5);
+}
+
+.texture-preview-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 12px 16px;
+  border-bottom: 1px solid #333;
+  flex-shrink: 0;
+}
+
+.texture-preview-modal-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #ddd;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+}
+
+.texture-preview-modal-close {
+  background: transparent;
+  border: none;
+  color: #999;
+  font-size: 24px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: background-color 0.15s, color 0.15s;
+  flex-shrink: 0;
+  margin-left: 12px;
+}
+
+.texture-preview-modal-close:hover {
+  background: #333;
+  color: #fff;
+}
+
+.texture-preview-modal-body {
+  padding: 16px;
+  overflow: auto;
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.texture-preview-modal-image-container {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+}
+
+.texture-preview-modal-img {
+  max-width: 100%;
+  max-height: calc(90vh - 120px);
+  object-fit: contain;
+  border: 1px solid #444;
+  border-radius: 4px;
+  background: repeating-conic-gradient(#333 0% 25%, #222 0% 50%) 50% / 16px 16px;
+}
+
+.texture-preview-modal-info {
+  font-size: 11px;
+  color: #888;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+  text-align: center;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.texture-preview-modal-url {
+  color: #666;
+  font-size: 10px;
+  word-break: break-all;
+  max-width: 600px;
+}
+
+.texture-preview-modal-loading {
+  color: #999;
+  font-size: 12px;
+  padding: 40px;
 }
 
 .properties-header {

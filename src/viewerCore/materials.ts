@@ -605,7 +605,7 @@ export function createMaterialFromShader(
 
   if (isMdlSourceAsset) {
     dbg('Creating MDL sourceAsset material for:', shader.path?.primPath, 'MDL:', mdlSource);
-    return createMdlSourceAssetMaterial({ shader, resolveAssetUrl: resolveAssetUrl as any });
+    return createMdlSourceAssetMaterial({ shader, resolveAssetUrl: resolveAssetUrl as any, root });
   }
 
   dbg('Falling back to default gray material for:', shader.path?.primPath);

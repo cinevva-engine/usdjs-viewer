@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import type { SdfPrimSpec } from '@cinevva/usdjs';
 
 import { applyUsdTransform2dToTexture, applyWrapMode } from '../textureUtils';
-import { deferTextureApply, getOrLoadTextureClone } from '../../textureCache';
+import { deferTextureApply, getOrLoadTextureClone, getOrLoadUdimTextureSet, type UdimTextureSet } from '../../textureCache';
+import { injectUdimSamplerFunction } from '../udim';
 
 // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
 // IMPORTANT: normal map resolution runs during scene load and can spam / slow traces.
@@ -74,9 +75,11 @@ export function applyUsdPreviewSurfaceNormalMap(opts: {
         const usdNormalScale = new THREE.Vector3(scale[0], scale[1], scale[2]);
         const usdNormalBias = new THREE.Vector3(bias[0], bias[1], bias[2]);
 
-        // Set up onBeforeCompile to inject custom normal map transformation
+        // Set up onBeforeCompile to inject custom normal map transformation.
         // Only needed if not using standard Three.js convention
         if (USDDEBUG) dbg('[NormalBiasScale DEBUG] isStandardThreeJs:', isStandardThreeJs, 'scale:', scale, 'bias:', bias);
+        let udimSet: UdimTextureSet | null = null;
+
         if (!isStandardThreeJs) {
           mat.userData.usdNormalScale = usdNormalScale;
           mat.userData.usdNormalBias = usdNormalBias;
@@ -103,9 +106,13 @@ uniform vec3 usdNormalBias;`
             //   mapN.xy *= normalScale;
             //   normal = normalize( tbn * mapN );
             // We replace the entire include with custom code that uses USD's scale/bias.
+            // If this normal map is UDIM, inject a UDIM sampler function and sample via it.
+            const udimFnName = udimSet ? injectUdimSamplerFunction(shader as any, 'normalMap', udimSet) : null;
+            const texSample = udimFnName ? `${udimFnName}( vNormalMapUv )` : `texture2D( normalMap, vNormalMapUv )`;
+
             const customNormalFragmentMaps = `
 #ifdef USE_NORMALMAP_OBJECTSPACE
-  normal = texture2D( normalMap, vNormalMapUv ).xyz * usdNormalScale + usdNormalBias;
+  normal = ${texSample}.xyz * usdNormalScale + usdNormalBias;
   #ifdef FLIP_SIDED
     normal = - normal;
   #endif
@@ -114,7 +121,7 @@ uniform vec3 usdNormalBias;`
   #endif
   normal = normalize( normalMatrix * normal );
 #elif defined( USE_NORMALMAP_TANGENTSPACE )
-  vec3 mapN = texture2D( normalMap, vNormalMapUv ).xyz * usdNormalScale + usdNormalBias;
+  vec3 mapN = ${texSample}.xyz * usdNormalScale + usdNormalBias;
   mapN.xy *= normalScale;
   normal = normalize( tbn * mapN );
 #elif defined( USE_BUMPMAP )
@@ -136,32 +143,43 @@ uniform vec3 usdNormalBias;`
           if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Using standard Three.js normal map handling');
         }
 
-        void getOrLoadTextureClone(url, (tex) => {
+        const configure = (tex: THREE.Texture) => {
           tex.colorSpace = THREE.NoColorSpace;
           applyWrapMode(tex, info.wrapS, info.wrapT);
           if (info.transform2d) applyUsdTransform2dToTexture(tex, info.transform2d);
-        }).then(
-          (tex) => {
-            if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Normal texture loaded successfully:', info.file);
-            deferTextureApply(() => {
-              mat.normalMap = tex;
-              // For standard Three.js convention, we don't need custom shader
-              // normalScale is left at default (1,1)
-              mat.needsUpdate = true;
-              if (USDDEBUG) {
-                dbg('[NormalBiasScale DEBUG] Material after normal map:', {
-                  color: mat.color.getHexString(),
-                  normalMap: !!mat.normalMap,
-                  roughness: mat.roughness,
-                  metalness: mat.metalness,
-                });
-              }
-            });
-          },
-          (err: unknown) => {
-            dbgError('Failed to load UsdPreviewSurface normal texture:', info.file, url, err);
-          },
-        );
+        };
+
+        const isUdim = url.includes('<UDIM>') || url.toLowerCase().includes('%3cudim%3e');
+        if (isUdim) {
+          void getOrLoadUdimTextureSet(url, configure).then(
+            (set) => {
+              if (!set || set.tiles.length === 0) throw new Error('UDIM set discovery returned no tiles');
+              udimSet = set;
+              if (USDDEBUG) dbg('[NormalBiasScale DEBUG] UDIM normal tiles loaded:', set.tiles.map((t) => t.udim));
+              deferTextureApply(() => {
+                // Assign first tile to enable USE_NORMALMAP + vNormalMapUv.
+                mat.normalMap = set.tiles[0]!.tex;
+                mat.needsUpdate = true;
+              });
+            },
+            (err: unknown) => {
+              dbgError('Failed to load UsdPreviewSurface UDIM normal texture set:', info.file, url, err);
+            },
+          );
+        } else {
+          void getOrLoadTextureClone(url, configure).then(
+            (tex) => {
+              if (USDDEBUG) dbg('[NormalBiasScale DEBUG] Normal texture loaded successfully:', info.file);
+              deferTextureApply(() => {
+                mat.normalMap = tex;
+                mat.needsUpdate = true;
+              });
+            },
+            (err: unknown) => {
+              dbgError('Failed to load UsdPreviewSurface normal texture:', info.file, url, err);
+            },
+          );
+        }
       }
     }
   }

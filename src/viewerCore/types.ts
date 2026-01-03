@@ -184,6 +184,7 @@ export type ViewerCore = {
     isTextureKey(key: string): boolean;
     getTextureProperties(key: string): Record<string, any> | null;
     setTextureProperty(key: string, path: string, value: any): boolean;
+    findTextureByUuid(uuid: string): THREE.Texture | null;
 
     // Raycasting for picking objects in the scene
     /**

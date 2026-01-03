@@ -12,13 +12,26 @@ type Res =
     | { id: number; ok: true; bitmap: ImageBitmap }
     | { id: number; ok: false; error: string };
 
-function looksLikeExr(url: string): boolean {
+function getUnderlyingAssetHint(url: string): string {
     try {
         const u = new URL(url, 'http://local/');
-        return u.pathname.toLowerCase().endsWith('.exr');
+        if (u.pathname.includes('/__usdjs_corpus')) {
+            const f = u.searchParams.get('file');
+            if (f) return f;
+        }
+        if (u.pathname.includes('/__usdjs_proxy')) {
+            const inner = u.searchParams.get('url');
+            if (inner) return inner;
+        }
+        return url;
     } catch {
-        return url.toLowerCase().includes('.exr');
+        return url;
     }
+}
+
+function looksLikeExr(url: string): boolean {
+    const hint = getUnderlyingAssetHint(url).toLowerCase();
+    return hint.includes('.exr');
 }
 
 async function decodeToImageBitmap(url: string): Promise<ImageBitmap> {

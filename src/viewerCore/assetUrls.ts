@@ -1,14 +1,90 @@
 import { resolveAssetPath } from '@cinevva/usdjs';
 
+/**
+ * Convert an omniverse:// URL to an HTTP URL for the CDN.
+ * 
+ * Path transformation rules:
+ * - Library → Assets
+ * - Scene_Templates → Scenes/Templates (underscore becomes slash)
+ * - Rest of path remains unchanged
+ * 
+ * @param omniverseUrl - The omniverse:// URL to convert
+ * @returns The HTTP URL, or null if conversion fails
+ */
+function convertOmniverseUrl(omniverseUrl: string): string | null {
+  try {
+    // Parse the omniverse:// URL
+    // Note: Standard URL() constructor doesn't handle custom protocols well
+    // So we manually parse it
+    const match = omniverseUrl.match(/^omniverse:\/\/([^\/]+)(\/.*)?$/);
+    if (!match) return null;
+    
+    const host = match[1]; // e.g., "ov-content"
+    let path = match[2] || '/'; // e.g., "/Library/Scene_Templates/..."
+    
+    // Handle known hosts
+    if (host === 'ov-content') {
+      // Transform path: Library -> Assets, Scene_Templates -> Scenes/Templates
+      if (path.startsWith('/Library/')) {
+        path = path.replace('/Library/', '/Assets/');
+      }
+      // Replace Scene_Templates with Scenes/Templates
+      path = path.replace(/\/Scene_Templates\//g, '/Scenes/Templates/');
+      
+      // Convert to CDN URL
+      const cdnBase = 'http://omniverse-content-production.s3-us-west-2.amazonaws.com';
+      return cdnBase + path;
+    }
+    
+    // For other hosts, try direct HTTP conversion
+    // (assuming they expose HTTP endpoints)
+    return `http://${host}${path}`;
+  } catch {
+    return null;
+  }
+}
+
 export function createResolveAssetUrl(opts: {
   getCurrentIdentifier: () => string | null | undefined;
 }): (assetPath: string, fromIdentifier?: string) => string | null {
   return (assetPath: string, fromIdentifier?: string): string | null => {
     try {
+      const USDDEBUG = typeof window !== 'undefined' && (
+        new URLSearchParams(window.location.search).get('usddebug') === '1' ||
+        window.localStorage?.getItem?.('usddebug') === '1'
+      );
+
+      if (USDDEBUG) {
+        console.log('[TEXTURE:resolveAssetUrl] START', {
+          assetPath,
+          fromIdentifier,
+          currentIdentifier: opts.getCurrentIdentifier(),
+        });
+      }
+
       const stripCorpusPrefix = (v: string): string => (v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v);
       // Some upstream callers may accidentally pass corpus-keyed identifiers/paths (`[corpus]...`).
       // Normalize early so we don't accidentally join `[corpus]packages/usdjs/...` into a directory path.
       const normalizedAssetPath = stripCorpusPrefix(assetPath);
+
+      // If it's an omniverse:// URL, convert it to HTTP and use the proxy endpoint
+      if (normalizedAssetPath.match(/^omniverse:\/\//i)) {
+        const httpUrl = convertOmniverseUrl(normalizedAssetPath);
+        if (httpUrl) {
+          if (USDDEBUG) {
+            console.log('[TEXTURE:resolveAssetUrl] omniverse:// converted', {
+              original: normalizedAssetPath,
+              converted: httpUrl,
+              result: `/__usdjs_proxy?url=${encodeURIComponent(httpUrl)}`,
+            });
+          }
+          return `/__usdjs_proxy?url=${encodeURIComponent(httpUrl)}`;
+        }
+        // If conversion fails, fall through to normal resolution
+        if (USDDEBUG) {
+          console.warn('[TEXTURE:resolveAssetUrl] omniverse:// conversion failed', normalizedAssetPath);
+        }
+      }
 
       // If it's an external URL (http:// or https://), use the proxy endpoint
       if (normalizedAssetPath.match(/^https?:\/\//)) {
@@ -50,10 +126,41 @@ export function createResolveAssetUrl(opts: {
 
       const resolved = normalizePosixPath(resolveAssetPath(normalizedAssetPath, identifier as any));
 
+      if (USDDEBUG) {
+        console.log('[TEXTURE:resolveAssetUrl] after resolution', {
+          normalizedAssetPath,
+          identifier,
+          resolved,
+        });
+      }
+
+      // If the resolved path is an omniverse:// URL, convert it to HTTP and use the proxy endpoint
+      if (resolved.match(/^omniverse:\/\//i)) {
+        const httpUrl = convertOmniverseUrl(resolved);
+        if (httpUrl) {
+          if (USDDEBUG) {
+            console.log('[TEXTURE:resolveAssetUrl] resolved omniverse:// converted', {
+              resolved,
+              converted: httpUrl,
+              result: `/__usdjs_proxy?url=${encodeURIComponent(httpUrl)}`,
+            });
+          }
+          return `/__usdjs_proxy?url=${encodeURIComponent(httpUrl)}`;
+        }
+        // If conversion fails, fall through to normal resolution
+        if (USDDEBUG) {
+          console.warn('[TEXTURE:resolveAssetUrl] resolved omniverse:// conversion failed', resolved);
+        }
+      }
+
       // If the resolved path is an external URL (e.g., when resolving relative to an external USD file),
       // use the proxy endpoint instead of corpus endpoint
       if (resolved.match(/^https?:\/\//)) {
-        return `/__usdjs_proxy?url=${encodeURIComponent(resolved)}`;
+        const result = `/__usdjs_proxy?url=${encodeURIComponent(resolved)}`;
+        if (USDDEBUG) {
+          console.log('[TEXTURE:resolveAssetUrl] HTTP URL', { resolved, result });
+        }
+        return result;
       }
 
       // The endpoint expects paths relative to packages/usdjs/, but resolveAssetPath returns
@@ -63,7 +170,16 @@ export function createResolveAssetUrl(opts: {
         relPath = resolved.slice('packages/usdjs/'.length);
       }
 
-      return `/__usdjs_corpus?file=${encodeURIComponent(relPath)}`;
+      const result = `/__usdjs_corpus?file=${encodeURIComponent(relPath)}`;
+      if (USDDEBUG) {
+        console.log('[TEXTURE:resolveAssetUrl] FINAL', {
+          resolved,
+          relPath,
+          result,
+        });
+      }
+
+      return result;
     } catch (err) {
       try {
         const q = new URLSearchParams((window as any)?.location?.search ?? '');

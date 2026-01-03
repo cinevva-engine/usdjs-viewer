@@ -2,6 +2,26 @@ import * as THREE from 'three';
 
 import type { PrimeTreeNode } from './types';
 
+// Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
+const USDDEBUG =
+  (() => {
+    try {
+      if (typeof window === 'undefined') return false;
+      const q = new URLSearchParams((window as any).location?.search ?? '');
+      if (q.get('usddebug') === '1') return true;
+      if (typeof localStorage !== 'undefined' && localStorage.getItem('usddebug') === '1') return true;
+    } catch {
+      // ignore
+    }
+    return false;
+  })();
+
+const dbgSceneTree = (...args: any[]) => {
+  if (!USDDEBUG) return;
+  // eslint-disable-next-line no-console
+  console.log(...args);
+};
+
 function objectLabel(o: THREE.Object3D): string {
   const type = (o as any)?.type ? String((o as any).type) : 'Object3D';
   const name = typeof o.name === 'string' && o.name.trim().length ? o.name.trim() : '(unnamed)';
@@ -21,9 +41,10 @@ const TEXTURE_MAP_NAMES = [
 
 function textureNode(tex: THREE.Texture, mapName: string, materialKey: string): PrimeTreeNode {
   const name = tex.name?.trim() || mapName;
-  const sourceInfo = tex.image ? 
-    (tex.image.src ? ` [${tex.image.width}×${tex.image.height}]` : ` [${tex.image.width || '?'}×${tex.image.height || '?'}]`) : 
-    '';
+  const img: any = (tex as any).image;
+  const sourceInfo = img
+    ? (img.src ? ` [${img.width}×${img.height}]` : ` [${img.width ?? '?'}×${img.height ?? '?'}]`)
+    : '';
   return {
     key: `${materialKey}:texture:${mapName}`,
     label: `${name} <Texture>${sourceInfo}`,
@@ -35,7 +56,7 @@ function materialNode(mat: THREE.Material, parentUuid: string, index?: number): 
   const type = (mat as any)?.type ?? 'Material';
   const name = mat.name?.trim() || (index !== undefined ? `Material[${index}]` : 'Material');
   const materialKey = `${parentUuid}:material${index !== undefined ? `:${index}` : ''}`;
-  
+
   // Collect texture children
   const textureChildren: PrimeTreeNode[] = [];
   const m = mat as any;
@@ -45,11 +66,10 @@ function materialNode(mat: THREE.Material, parentUuid: string, index?: number): 
       textureChildren.push(textureNode(tex, mapName, materialKey));
     }
   }
-  
+
   // Debug: log texture detection
-  // eslint-disable-next-line no-console
-  console.log('[SceneTree] Material:', name, 'textures found:', textureChildren.map(t => t.label));
-  
+  dbgSceneTree('[SceneTree] Material:', name, 'textures found:', textureChildren.map(t => t.label));
+
   return {
     key: materialKey,
     label: `${name} <${type}>`,
@@ -65,7 +85,7 @@ function geometryNode(geom: THREE.BufferGeometry, parentUuid: string): PrimeTree
   const vertCount = posAttr ? posAttr.count : 0;
   const indexCount = geom.index ? geom.index.count : 0;
   const info = indexCount ? `[${vertCount} verts, ${indexCount / 3} tris]` : `[${vertCount} verts]`;
-  
+
   return {
     key: `${parentUuid}:geometry`,
     label: `${name} <${type}> ${info}`,
@@ -76,14 +96,14 @@ function geometryNode(geom: THREE.BufferGeometry, parentUuid: string): PrimeTree
 function boneNode(bone: THREE.Bone, skeletonKey: string): PrimeTreeNode {
   const name = bone.name?.trim() || 'Bone';
   const childBones: PrimeTreeNode[] = [];
-  
+
   // Recursively add child bones
   for (const child of bone.children) {
     if ((child as any).isBone) {
       childBones.push(boneNode(child as THREE.Bone, skeletonKey));
     }
   }
-  
+
   return {
     key: `${skeletonKey}:bone:${bone.uuid}`,
     label: `${name} <Bone>`,
@@ -95,7 +115,7 @@ function boneNode(bone: THREE.Bone, skeletonKey: string): PrimeTreeNode {
 function skeletonNode(skeleton: THREE.Skeleton, parentUuid: string): PrimeTreeNode {
   const skeletonKey = `${parentUuid}:skeleton`;
   const boneCount = skeleton.bones.length;
-  
+
   // Find root bones (bones without a parent bone)
   const rootBones: PrimeTreeNode[] = [];
   for (const bone of skeleton.bones) {
@@ -104,7 +124,7 @@ function skeletonNode(skeleton: THREE.Skeleton, parentUuid: string): PrimeTreeNo
       rootBones.push(boneNode(bone, skeletonKey));
     }
   }
-  
+
   return {
     key: skeletonKey,
     label: `Skeleton [${boneCount} bones]`,
@@ -124,12 +144,12 @@ function isUsdStructuralPrim(o: THREE.Object3D): boolean {
   // Only filter if it's a plain Object3D with no geometry/material and matches pattern
   if ((o as any).isMesh || (o as any).isLight || (o as any).isCamera) return false;
   if (o.children?.some((c: any) => c.isMesh || c.isLight || c.isCamera)) return false;
-  
+
   // Check standard USD patterns
   if (usdPatterns.some(p => name.includes(p))) return true;
   // Check skeleton patterns
   if (skelPatterns.some(p => name.includes(p))) return true;
-  
+
   return false;
 }
 
@@ -140,7 +160,7 @@ function isVisualBoneXform(o: THREE.Object3D): boolean {
   if ((o as any).isBone) return false;
   // If it has meshes/lights/cameras, it's not just a bone transform
   if ((o as any).isMesh || (o as any).isLight || (o as any).isCamera) return false;
-  
+
   // Recursively check if this object or any descendant has meaningful content
   function hasMeaningfulContent(obj: THREE.Object3D): boolean {
     if ((obj as any).isMesh || (obj as any).isLight || (obj as any).isCamera) return true;
@@ -150,23 +170,23 @@ function isVisualBoneXform(o: THREE.Object3D): boolean {
     }
     return false;
   }
-  
+
   // If this subtree has any meshes/lights/cameras, don't filter it
   if (hasMeaningfulContent(o)) return false;
-  
+
   // Check if this looks like a bone transform chain (all children are also just transforms)
   const name = o.name?.toLowerCase() ?? '';
   // Only filter if name contains "bone" or "joint" (but NOT "skeleton" which may contain meshes)
   if (name.includes('bone') || name.includes('joint')) {
     return true;
   }
-  
+
   return false;
 }
 
 function toNode(o: THREE.Object3D, filterUsdPrims = true): PrimeTreeNode {
   const childNodes: PrimeTreeNode[] = [];
-  
+
   // Add regular children first (filter out USD structural prims and Bones if requested)
   if (o.children?.length) {
     for (const child of o.children) {
@@ -178,16 +198,16 @@ function toNode(o: THREE.Object3D, filterUsdPrims = true): PrimeTreeNode {
       childNodes.push(toNode(child, filterUsdPrims));
     }
   }
-  
+
   // Add geometry and material nodes for meshes
   if ((o as any).isMesh) {
     const mesh = o as THREE.Mesh;
-    
+
     // Add geometry node
     if (mesh.geometry) {
       childNodes.push(geometryNode(mesh.geometry, o.uuid));
     }
-    
+
     // Add material nodes
     if (mesh.material) {
       if (Array.isArray(mesh.material)) {
@@ -198,7 +218,7 @@ function toNode(o: THREE.Object3D, filterUsdPrims = true): PrimeTreeNode {
         childNodes.push(materialNode(mesh.material, o.uuid));
       }
     }
-    
+
     // Add skeleton for SkinnedMesh
     if ((o as any).isSkinnedMesh) {
       const skinnedMesh = o as THREE.SkinnedMesh;
@@ -207,7 +227,7 @@ function toNode(o: THREE.Object3D, filterUsdPrims = true): PrimeTreeNode {
       }
     }
   }
-  
+
   return {
     key: o.uuid,
     label: objectLabel(o),
@@ -251,6 +271,56 @@ export function findObjectByUuid(scene: THREE.Scene, uuid: string): THREE.Object
   return found;
 }
 
+export function findTextureByUuid(scene: THREE.Scene, uuid: string): THREE.Texture | null {
+  let found: THREE.Texture | null = null;
+  
+  // Check scene background/environment
+  const bg: any = (scene as any).background;
+  const env: any = (scene as any).environment;
+  if (bg?.isTexture && bg.uuid === uuid) return bg;
+  if (env?.isTexture && env.uuid === uuid) return env;
+  
+  // Search materials in the scene
+  scene.traverse((obj: any) => {
+    if (found) return; // Early exit if already found
+    
+    const mats = obj?.material;
+    const arr = Array.isArray(mats) ? mats : mats ? [mats] : [];
+    for (const m of arr) {
+      if (!m) continue;
+      
+      // Check known texture map properties
+      const TEXTURE_MAP_NAMES = [
+        'map', 'normalMap', 'roughnessMap', 'metalnessMap', 'emissiveMap',
+        'aoMap', 'bumpMap', 'displacementMap', 'alphaMap', 'envMap',
+        'lightMap', 'specularMap', 'clearcoatMap', 'clearcoatNormalMap',
+        'clearcoatRoughnessMap', 'sheenColorMap', 'sheenRoughnessMap',
+        'transmissionMap', 'thicknessMap', 'iridescenceMap', 'iridescenceThicknessMap',
+        'anisotropyMap',
+      ];
+      
+      for (const mapName of TEXTURE_MAP_NAMES) {
+        const tex = (m as any)[mapName];
+        if (tex?.isTexture && tex.uuid === uuid) {
+          found = tex;
+          return;
+        }
+      }
+      
+      // Also check other properties
+      for (const k of Object.keys(m)) {
+        const tex = (m as any)[k];
+        if (tex?.isTexture && tex.uuid === uuid) {
+          found = tex;
+          return;
+        }
+      }
+    }
+  });
+  
+  return found;
+}
+
 // Parse material key format: "parentUuid:material" or "parentUuid:material:index"
 export function parseMaterialKey(key: string): { parentUuid: string; index?: number } | null {
   const match = key.match(/^(.+):material(?::(\d+))?$/);
@@ -264,13 +334,13 @@ export function parseMaterialKey(key: string): { parentUuid: string; index?: num
 export function findMaterialByKey(scene: THREE.Scene, key: string): THREE.Material | null {
   const parsed = parseMaterialKey(key);
   if (!parsed) return null;
-  
+
   const obj = findObjectByUuid(scene, parsed.parentUuid);
   if (!obj || !(obj as any).isMesh) return null;
-  
+
   const mesh = obj as THREE.Mesh;
   if (!mesh.material) return null;
-  
+
   if (Array.isArray(mesh.material)) {
     return parsed.index !== undefined ? mesh.material[parsed.index] ?? null : null;
   }
@@ -301,7 +371,7 @@ export function getMaterialProperties(mat: THREE.Material): Record<string, any> 
 export function setMaterialProperty(mat: THREE.Material, path: string, value: any): boolean {
   try {
     const m = mat as any;
-    
+
     if (path === 'color' || path === 'emissive') {
       // Handle color as hex
       let colorValue: number;
@@ -321,7 +391,7 @@ export function setMaterialProperty(mat: THREE.Material, path: string, value: an
       m[path]?.setHex?.(colorValue);
       return true;
     }
-    
+
     if (['opacity', 'metalness', 'roughness', 'emissiveIntensity'].includes(path)) {
       const num = parseFloat(value);
       if (isNaN(num)) return false;
@@ -329,18 +399,18 @@ export function setMaterialProperty(mat: THREE.Material, path: string, value: an
       mat.needsUpdate = true;
       return true;
     }
-    
+
     if (['transparent', 'wireframe', 'depthTest', 'depthWrite', 'visible'].includes(path)) {
       m[path] = value === true || value === 'true' || value === '1';
       mat.needsUpdate = true;
       return true;
     }
-    
+
     if (path === 'name') {
       mat.name = String(value);
       return true;
     }
-    
+
     // Handle side
     if (path === 'side') {
       const sides: Record<string, THREE.Side> = {
@@ -354,7 +424,7 @@ export function setMaterialProperty(mat: THREE.Material, path: string, value: an
       mat.needsUpdate = true;
       return true;
     }
-    
+
     return false;
   } catch (e) {
     // eslint-disable-next-line no-console
@@ -376,59 +446,60 @@ export function parseTextureKey(key: string): { materialKey: string; mapName: st
 export function findTextureByKey(scene: THREE.Scene, key: string): THREE.Texture | null {
   const parsed = parseTextureKey(key);
   if (!parsed) return null;
-  
+
   const mat = findMaterialByKey(scene, parsed.materialKey);
   if (!mat) return null;
-  
+
   const tex = (mat as any)[parsed.mapName];
   return tex?.isTexture ? tex : null;
 }
 
 export function getTextureProperties(tex: THREE.Texture): Record<string, any> {
   const t = tex as any;
-  
+  const img: any = (tex as any).image;
+
   // Try to get image source URL
   let imageUrl: string | null = null;
   let imageWidth: number | null = null;
   let imageHeight: number | null = null;
-  
-  if (tex.image) {
-    if (tex.image.src) {
+
+  if (img) {
+    if (img.src) {
       // HTMLImageElement
-      imageUrl = tex.image.src;
-    } else if (tex.image instanceof HTMLCanvasElement) {
+      imageUrl = img.src;
+    } else if (img instanceof HTMLCanvasElement) {
       // Canvas - convert to data URL
       try {
-        imageUrl = tex.image.toDataURL('image/png');
+        imageUrl = img.toDataURL('image/png');
       } catch {
         // Security error if canvas is tainted
       }
-    } else if (typeof ImageBitmap !== 'undefined' && tex.image instanceof ImageBitmap) {
+    } else if (typeof ImageBitmap !== 'undefined' && img instanceof ImageBitmap) {
       // ImageBitmap - need to draw to canvas first
       try {
         const canvas = document.createElement('canvas');
-        canvas.width = tex.image.width;
-        canvas.height = tex.image.height;
+        canvas.width = img.width;
+        canvas.height = img.height;
         const ctx = canvas.getContext('2d');
         if (ctx) {
-          ctx.drawImage(tex.image, 0, 0);
+          ctx.drawImage(img, 0, 0);
           imageUrl = canvas.toDataURL('image/png');
         }
       } catch {
         // Ignore errors
       }
     }
-    imageWidth = tex.image.width ?? null;
-    imageHeight = tex.image.height ?? null;
+    imageWidth = img.width ?? null;
+    imageHeight = img.height ?? null;
   }
-  
+
   // Get wrap mode strings
   const wrapModes: Record<number, string> = {
     [THREE.RepeatWrapping]: 'RepeatWrapping',
     [THREE.ClampToEdgeWrapping]: 'ClampToEdgeWrapping',
     [THREE.MirroredRepeatWrapping]: 'MirroredRepeatWrapping',
   };
-  
+
   // Get filter mode strings
   const filterModes: Record<number, string> = {
     [THREE.NearestFilter]: 'NearestFilter',
@@ -438,14 +509,14 @@ export function getTextureProperties(tex: THREE.Texture): Record<string, any> {
     [THREE.LinearMipmapNearestFilter]: 'LinearMipmapNearest',
     [THREE.LinearMipmapLinearFilter]: 'LinearMipmapLinear',
   };
-  
+
   // Get color space string
   const colorSpaces: Record<string, string> = {
     'srgb': 'sRGB',
     'srgb-linear': 'Linear sRGB',
     '': 'None',
   };
-  
+
   return {
     name: tex.name || '(unnamed)',
     uuid: tex.uuid,
@@ -487,7 +558,7 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     // Handle rotation (single number)
     if (path === 'rotation') {
       const num = parseFloat(value);
@@ -496,7 +567,7 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     // Handle anisotropy
     if (path === 'anisotropy') {
       const num = parseInt(value, 10);
@@ -505,7 +576,7 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     // Handle boolean flags that affect GPU upload
     if (['flipY', 'generateMipmaps', 'premultiplyAlpha'].includes(path)) {
       const boolVal = value === true || value === 'true' || value === '1';
@@ -515,13 +586,13 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     // Handle name
     if (path === 'name') {
       tex.name = String(value);
       return true;
     }
-    
+
     // Handle wrap modes
     if (path === 'wrapS' || path === 'wrapT') {
       const wrapModes: Record<string, number> = {
@@ -535,7 +606,7 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     // Handle mag filter
     if (path === 'magFilter') {
       const filterModes: Record<string, THREE.MagnificationTextureFilter> = {
@@ -548,7 +619,7 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     // Handle min filter
     if (path === 'minFilter') {
       const filterModes: Record<string, THREE.MinificationTextureFilter> = {
@@ -565,7 +636,7 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     // Handle color space
     if (path === 'colorSpace') {
       const colorSpaces: Record<string, string> = {
@@ -579,7 +650,7 @@ export function setTextureProperty(tex: THREE.Texture, path: string, value: any)
       tex.needsUpdate = true;
       return true;
     }
-    
+
     return false;
   } catch (e) {
     // eslint-disable-next-line no-console
@@ -647,11 +718,11 @@ export function getObjectProperties(obj: THREE.Object3D): Record<string, any> {
   } else if ((obj as any).isLight) {
     const light = obj as THREE.Light;
     const l = light as any;
-    
+
     // Base light properties
     props.color = light.color.getHex();
     props.intensity = light.intensity;
-    
+
     // SpotLight specific properties
     if (l.isSpotLight) {
       props.angle = l.angle;
@@ -662,31 +733,31 @@ export function getObjectProperties(obj: THREE.Object3D): Record<string, any> {
         props.target = { x: l.target.position.x, y: l.target.position.y, z: l.target.position.z };
       }
     }
-    
+
     // PointLight specific properties
     if (l.isPointLight) {
       props.decay = l.decay;
       props.distance = l.distance;
     }
-    
+
     // DirectionalLight specific properties
     if (l.isDirectionalLight) {
       if (l.target) {
         props.target = { x: l.target.position.x, y: l.target.position.y, z: l.target.position.z };
       }
     }
-    
+
     // RectAreaLight specific properties
     if (l.isRectAreaLight) {
       props.width = l.width;
       props.height = l.height;
     }
-    
+
     // HemisphereLight specific properties
     if (l.isHemisphereLight) {
       props.groundColor = l.groundColor?.getHex?.() ?? null;
     }
-    
+
     // Shadow properties (for lights that support shadows)
     if (l.castShadow !== undefined) {
       props.castShadow = l.castShadow;
@@ -751,7 +822,6 @@ export const EDITABLE_PROPERTIES: Record<string, 'string' | 'number' | 'boolean'
   // Light properties (common)
   'color': 'color',
   'intensity': 'number',
-  'castShadow': 'boolean',
   // SpotLight properties
   'angle': 'number',
   'penumbra': 'number',

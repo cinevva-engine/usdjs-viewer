@@ -24,6 +24,7 @@ export function createRunPipeline(opts: {
   getCurrentIdentifier: () => string;
   setStageUnitScale: (s: number) => void;
   getStageUnitScale: () => number;
+  setStageUpAxis: (axis: string) => void;
 
   domeEnvResetForNewSample: () => void;
   applyCameraSettings: (layer: any) => boolean;
@@ -92,6 +93,7 @@ export function createRunPipeline(opts: {
     getCurrentIdentifier,
     setStageUnitScale,
     getStageUnitScale,
+    setStageUpAxis,
     domeEnvResetForNewSample,
     applyCameraSettings,
     applyRenderSettings,
@@ -222,10 +224,22 @@ export function createRunPipeline(opts: {
       // on the root layer, so prefer stage.rootLayer for settings, and fall back to composed layer.
       const layerForSettings = stage.rootLayer?.metadata?.customLayerData ? stage.rootLayer : rootLayerToRender;
 
-      // USD stage unit scale (metersPerUnit). If authored in centimeters (0.01), we scale authored
-      // translations/points/camera settings so Three's physically-based lighting behaves as expected.
-      const mpu = layerForSettings?.metadata?.metersPerUnit;
-      setStageUnitScale(typeof mpu === 'number' && Number.isFinite(mpu) && mpu > 0 ? mpu : 1.0);
+      // USD stage linear units (metersPerUnit) are *metadata* describing what one authored unit
+      // means in meters. OpenUSD's xform evaluation does NOT implicitly scale xforms/points by
+      // metersPerUnit; it just composes the authored numbers.
+      //
+      // To match OpenUSD tooling (usdview/usdrecord) and typical DCC expectations for raw USD
+      // transforms, we keep the viewer's render-unit scale at 1.0 (no implicit unit conversion).
+      //
+      // If we ever want physically-based lighting in real-world meters, we should apply unit
+      // conversion consistently at an integration boundary (or behind a user toggle), not during
+      // xform evaluation.
+      setStageUnitScale(1.0);
+
+      // USD stage up axis (upAxis). Three.js is "mathematically axis-agnostic", but camera controls and helpers
+      // (grid/orbit) assume an up direction. Respect authored stage upAxis so Z-up content doesn't appear "sideways".
+      const upAxis = layerForSettings?.metadata?.upAxis;
+      setStageUpAxis(typeof upAxis === 'string' ? upAxis : 'Y');
 
       domeEnvResetForNewSample();
       const hasAuthoredCamera = applyCameraSettings(layerForSettings);

@@ -1,8 +1,11 @@
 import * as THREE from 'three';
 import { resolveAssetPath, type SdfPrimSpec } from '@cinevva/usdjs';
 
-import { deferTextureApply, getOrLoadTextureClone } from '../textureCache';
+import { deferTextureApply, getOrLoadTextureClone, getOrLoadUdimTextureSet } from '../textureCache';
 import { extractToken, extractColor3f, extractFloat, extractAssetPath as extractAssetPathUtil } from './valueExtraction';
+import { applyUdimPackedOrmSampling, applyUdimTextureSampling } from './udim';
+import { loadTextureToMaterialSlot } from './udimLoader';
+import { findPrimByPath } from '../usdPaths';
 
 type MdlResolved = {
     mdlUrl: string;
@@ -36,21 +39,108 @@ function getStringProp(shader: SdfPrimSpec, name: string): string | null {
     return token ? stripCorpusPrefix(token) : null;
 }
 
-function getAssetProp(shader: SdfPrimSpec, name: string): string | null {
+function getAssetProp(shader: SdfPrimSpec, name: string, root?: SdfPrimSpec): string | null {
+    const USDDEBUG = typeof window !== 'undefined' && (
+        new URLSearchParams(window.location.search).get('usddebug') === '1' ||
+        window.localStorage?.getItem?.('usddebug') === '1'
+    );
+
+    // First check for a direct asset property
     const dv: any = shader.properties?.get(name)?.defaultValue;
-    if (typeof dv === 'string') return stripCorpusPrefix(dv);
+    if (typeof dv === 'string') {
+        if (USDDEBUG) console.log(`[MATERIALS:MDL] getAssetProp(${name}): direct string`, dv);
+        return stripCorpusPrefix(dv);
+    }
     if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') {
         const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
         const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
         const normVal = stripCorpusPrefix(dv.value);
-        return normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
+        const result = normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
+        if (USDDEBUG) console.log(`[MATERIALS:MDL] getAssetProp(${name}): asset type`, { value: dv.value, fromId, result });
+        return result;
     }
     // usdjs sometimes encodes @path@ values as 'reference' SdfValue.
     if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') {
         const fromId = typeof (dv as any).__fromIdentifier === 'string' ? (dv as any).__fromIdentifier : null;
         const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
         const normVal = stripCorpusPrefix(dv.assetPath);
-        return normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
+        const result = normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
+        if (USDDEBUG) console.log(`[MATERIALS:MDL] getAssetProp(${name}): reference type`, { assetPath: dv.assetPath, fromId, result });
+        return result;
+    }
+
+    // Check for a connection (e.g., inputs:diffuse_texture.connect = </path/to/textureShader.outputs:rgb>)
+    const connectPropName = `${name}.connect`;
+    const connectProp = shader.properties?.get(connectPropName);
+    
+    if (USDDEBUG) {
+        console.log(`[MATERIALS:MDL] getAssetProp(${name}): checking connection`, {
+            connectPropName,
+            hasConnectProp: !!connectProp,
+            hasRoot: !!root,
+            connectPropValue: connectProp?.defaultValue,
+        });
+    }
+    
+    if (connectProp && root) {
+        const connDv: any = connectProp.defaultValue;
+        if (USDDEBUG) {
+            console.log(`[MATERIALS:MDL] getAssetProp(${name}): connection value`, {
+                connDv,
+                type: typeof connDv,
+                isObject: typeof connDv === 'object',
+                hasType: connDv?.type,
+                hasValue: typeof connDv?.value === 'string',
+            });
+        }
+        if (connDv && typeof connDv === 'object' && connDv.type === 'sdfpath' && typeof connDv.value === 'string') {
+            const targetPath = connDv.value; // e.g., </Environment/riser/Looks/riser_m/diffuseColorTex.outputs:rgb>
+            const lastDot = targetPath.lastIndexOf('.');
+            const shaderPath = lastDot > 0 ? targetPath.substring(0, lastDot) : targetPath;
+            
+            if (USDDEBUG) {
+                console.log(`[MATERIALS:MDL] getAssetProp(${name}): found connection`, {
+                    targetPath,
+                    shaderPath,
+                });
+            }
+
+            // Find the connected shader prim
+            const texShader = findPrimByPath(root, shaderPath);
+            if (texShader) {
+                // Try to get the file from the texture shader (UsdUVTexture convention)
+                const fileProp = texShader.properties?.get('inputs:file');
+                if (fileProp) {
+                    const fileDv: any = fileProp.defaultValue;
+                    if (typeof fileDv === 'string') {
+                        if (USDDEBUG) console.log(`[MATERIALS:MDL] getAssetProp(${name}): found file in connected shader`, fileDv);
+                        return stripCorpusPrefix(fileDv);
+                    }
+                    if (fileDv && typeof fileDv === 'object' && fileDv.type === 'asset' && typeof fileDv.value === 'string') {
+                        const fromId = typeof fileDv.__fromIdentifier === 'string' ? fileDv.__fromIdentifier : null;
+                        const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+                        const normVal = stripCorpusPrefix(fileDv.value);
+                        const result = normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
+                        if (USDDEBUG) console.log(`[MATERIALS:MDL] getAssetProp(${name}): found asset in connected shader`, { value: fileDv.value, fromId, result });
+                        return result;
+                    }
+                }
+                if (USDDEBUG) {
+                    console.warn(`[MATERIALS:MDL] getAssetProp(${name}): connected shader found but no file property`, {
+                        shaderPath,
+                        properties: Array.from(texShader.properties?.keys() ?? []),
+                    });
+                }
+            } else {
+                if (USDDEBUG) {
+                    console.warn(`[MATERIALS:MDL] getAssetProp(${name}): connected shader not found`, shaderPath);
+                }
+            }
+        }
+    }
+
+    if (USDDEBUG && !dv && !connectProp) {
+        console.log(`[MATERIALS:MDL] getAssetProp(${name}): not found`);
     }
     return null;
 }
@@ -140,21 +230,138 @@ function isBuiltInMdl(mdlAsset: string): boolean {
 function resolveFromUsdShaderInputs(
     shader: SdfPrimSpec,
     mdlAsset: string,
+    root?: SdfPrimSpec,
 ): MdlResolved {
     console.log('[MATERIALS:MDL] Resolving built-in MDL from USD shader inputs:', mdlAsset);
+
+    const USDDEBUG = typeof window !== 'undefined' && (
+        new URLSearchParams(window.location.search).get('usddebug') === '1' ||
+        window.localStorage?.getItem?.('usddebug') === '1'
+    );
+
+    if (USDDEBUG) {
+        console.log('[MATERIALS:MDL] Shader properties:', {
+            shaderPath: shader.path?.primPath,
+            propertyKeys: Array.from(shader.properties?.keys() ?? []),
+            children: Array.from(shader.children?.keys() ?? []),
+            hasRoot: !!root,
+            rootPath: root?.path?.primPath,
+        });
+        
+        // Log all input properties
+        const inputProps = Array.from(shader.properties?.keys() ?? []).filter(k => k.startsWith('inputs:'));
+        console.log('[MATERIALS:MDL] Input properties:', inputProps);
+        
+        // Log all properties (including .connect properties)
+        const allProps = Array.from(shader.properties?.keys() ?? []);
+        const connectProps = allProps.filter(k => k.includes('.connect'));
+        console.log('[MATERIALS:MDL] All .connect properties found:', connectProps);
+        for (const connectPropName of connectProps) {
+            const connectProp = shader.properties?.get(connectPropName);
+            console.log(`[MATERIALS:MDL]   ${connectPropName}:`, connectProp?.defaultValue);
+        }
+        
+        for (const propName of inputProps) {
+            const prop = shader.properties?.get(propName);
+            const defaultValue = prop?.defaultValue;
+            console.log(`[MATERIALS:MDL]   ${propName}:`, defaultValue);
+        }
+    }
 
     const subId = getStringProp(shader, 'info:mdl:sourceAsset:subIdentifier');
 
     // Read texture inputs using OmniPBR naming convention
-    const textures: MdlResolved['textures'] = {
-        baseColor: getAssetProp(shader, 'inputs:diffuse_texture') ?? undefined,
-        normal: getAssetProp(shader, 'inputs:normalmap_texture') ?? undefined,
-        orm: getAssetProp(shader, 'inputs:ORM_texture') ?? undefined,
-        roughness: getAssetProp(shader, 'inputs:reflectionroughness_texture') ?? undefined,
-        metallic: getAssetProp(shader, 'inputs:metallic_texture') ?? undefined,
-        emissive: getAssetProp(shader, 'inputs:emissive_mask_texture') ?? undefined,
-        opacity: getAssetProp(shader, 'inputs:opacity_texture') ?? undefined,
+    // First try direct properties and connections
+    let textures: MdlResolved['textures'] = {
+        baseColor: getAssetProp(shader, 'inputs:diffuse_texture', root) ?? undefined,
+        normal: getAssetProp(shader, 'inputs:normalmap_texture', root) ?? undefined,
+        orm: getAssetProp(shader, 'inputs:ORM_texture', root) ?? undefined,
+        roughness: getAssetProp(shader, 'inputs:reflectionroughness_texture', root) ?? undefined,
+        metallic: getAssetProp(shader, 'inputs:metallic_texture', root) ?? undefined,
+        emissive: getAssetProp(shader, 'inputs:emissive_mask_texture', root) ?? undefined,
+        opacity: getAssetProp(shader, 'inputs:opacity_texture', root) ?? undefined,
     };
+
+    // If textures weren't found via connections, try finding texture shaders by name pattern
+    // Some USD files store textures as child shader prims with predictable names
+    if (root && (!textures.baseColor || !textures.normal || !textures.metallic || !textures.roughness)) {
+        // Find the material prim (parent of the shader)
+        const shaderPath = shader.path?.primPath;
+        if (shaderPath) {
+            const parts = shaderPath.split('/').filter(Boolean);
+            if (parts.length >= 2) {
+                // Material should be parent of shader: /Material/Shader -> /Material
+                const materialPath = '/' + parts.slice(0, -1).join('/');
+                const materialPrim = findPrimByPath(root, materialPath);
+                
+                if (USDDEBUG) {
+                    console.log('[MATERIALS:MDL] Looking for texture shaders in material', {
+                        materialPath,
+                        materialPrim: materialPrim?.path?.primPath,
+                        children: Array.from(materialPrim?.children?.keys() ?? []),
+                    });
+                }
+
+                if (materialPrim && materialPrim.children) {
+                    // Common texture shader naming patterns in Omniverse
+                    const textureShaderMap: Record<string, string[]> = {
+                        baseColor: ['diffuseColorTex', 'diffuseTex', 'diffuse_texture', 'albedoTex'],
+                        normal: ['normalTex', 'normalmapTex', 'normal_texture'],
+                        metallic: ['metallicTex', 'metallic_texture'],
+                        roughness: ['roughnessTex', 'roughness_texture'],
+                        orm: ['ormTex', 'ORM_texture', 'orm_texture'],
+                        opacity: ['opacityTex', 'opacity_texture'],
+                    };
+
+                    // Search for texture shaders by name
+                    for (const [textureType, namePatterns] of Object.entries(textureShaderMap)) {
+                        if (textures[textureType as keyof typeof textures]) continue; // Already found
+
+                        for (const pattern of namePatterns) {
+                            const texShader = materialPrim.children.get(pattern);
+                            if (texShader) {
+                                if (USDDEBUG) {
+                                    console.log(`[MATERIALS:MDL] Found texture shader by name: ${pattern} for ${textureType}`);
+                                }
+                                // Extract file from texture shader
+                                const fileProp = texShader.properties?.get('inputs:file');
+                                if (fileProp) {
+                                    const fileDv: any = fileProp.defaultValue;
+                                    let filePath: string | null = null;
+                                    
+                                    if (typeof fileDv === 'string') {
+                                        filePath = stripCorpusPrefix(fileDv);
+                                    } else if (fileDv && typeof fileDv === 'object' && fileDv.type === 'asset' && typeof fileDv.value === 'string') {
+                                        const fromId = typeof fileDv.__fromIdentifier === 'string' ? fileDv.__fromIdentifier : null;
+                                        const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+                                        const normVal = stripCorpusPrefix(fileDv.value);
+                                        filePath = normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
+                                    } else if (fileDv && typeof fileDv === 'object' && fileDv.type === 'reference' && typeof fileDv.assetPath === 'string') {
+                                        const fromId = typeof fileDv.__fromIdentifier === 'string' ? fileDv.__fromIdentifier : null;
+                                        const normFromId = typeof fromId === 'string' ? stripCorpusPrefix(fromId) : null;
+                                        const normVal = stripCorpusPrefix(fileDv.assetPath);
+                                        filePath = normFromId ? resolveAssetPath(normVal, normFromId) : normVal;
+                                    }
+
+                                    if (filePath) {
+                                        if (USDDEBUG) {
+                                            console.log(`[MATERIALS:MDL] Extracted texture path for ${textureType}:`, filePath);
+                                        }
+                                        textures[textureType as keyof typeof textures] = filePath;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (USDDEBUG) {
+        console.log('[MATERIALS:MDL] Extracted textures:', textures);
+    }
 
     // Read constant values using utility functions
     const constants: MdlResolved['constants'] = {};
@@ -184,6 +391,7 @@ function resolveFromUsdShaderInputs(
 async function resolveMdlSourceAsset(
     shader: SdfPrimSpec,
     resolveAssetUrl?: (assetPath: string) => string | null,
+    root?: SdfPrimSpec,
 ): Promise<MdlResolved | null> {
     console.log('[MATERIALS:MDL] resolveMdlSourceAsset called for:', shader.path?.primPath);
     const impl = getStringProp(shader, 'info:implementationSource');
@@ -199,7 +407,7 @@ async function resolveMdlSourceAsset(
     // Check if this is a built-in MDL material
     if (isBuiltInMdl(mdlAsset)) {
         console.log('[MATERIALS:MDL] Detected built-in MDL material:', mdlAsset);
-        return resolveFromUsdShaderInputs(shader, mdlAsset);
+        return resolveFromUsdShaderInputs(shader, mdlAsset, root);
     }
 
     // Try to fetch the MDL file
@@ -211,7 +419,7 @@ async function resolveMdlSourceAsset(
     } catch (err) {
         // Fetch failed - fall back to reading USD shader inputs
         console.warn('[MATERIALS:MDL] MDL fetch failed, falling back to USD shader inputs:', err);
-        return resolveFromUsdShaderInputs(shader, mdlAsset);
+        return resolveFromUsdShaderInputs(shader, mdlAsset, root);
     }
 
     const args = extractMdlTextureArgs(mdlText);
@@ -272,6 +480,7 @@ function configureLinearTexture(tex: THREE.Texture) {
 export function createMdlSourceAssetMaterial(opts: {
     shader: SdfPrimSpec;
     resolveAssetUrl?: (assetPath: string, fromIdentifier?: string) => string | null;
+    root?: SdfPrimSpec;
 }): THREE.MeshStandardMaterial {
     const { shader, resolveAssetUrl } = opts;
 
@@ -292,7 +501,7 @@ export function createMdlSourceAssetMaterial(opts: {
     // Kick off async MDL parsing + texture application.
     void (async () => {
         console.log('[MATERIALS:MDL] Starting async MDL resolution for:', shader.path?.primPath);
-        const mdl = await resolveMdlSourceAsset(shader, resolveAssetUrl ? (p) => resolveAssetUrl(p) : undefined);
+        const mdl = await resolveMdlSourceAsset(shader, resolveAssetUrl ? (p) => resolveAssetUrl(p) : undefined, opts.root);
         if (!mdl) {
             console.warn('[MATERIALS:MDL] Failed to resolve MDL for:', shader.path?.primPath);
             return;
@@ -304,14 +513,19 @@ export function createMdlSourceAssetMaterial(opts: {
             constants: mdl.constants,
         });
 
-        if (mdl.constants.diffuseColor) {
+        // Only apply diffuseColor constant if there's no texture (texture will override it)
+        if (mdl.constants.diffuseColor && !mdl.textures.baseColor) {
             console.log('[MATERIALS:MDL] Applying diffuseColor constant:', mdl.constants.diffuseColor.getHexString());
             deferTextureApply(() => {
                 mat.color.copy(mdl.constants.diffuseColor!);
                 mat.needsUpdate = true;
             });
         } else {
-            console.log('[MATERIALS:MDL] No diffuseColor constant found, keeping default:', mat.color.getHexString());
+            if (mdl.textures.baseColor) {
+                console.log('[MATERIALS:MDL] Skipping diffuseColor constant because baseColor texture is present');
+            } else {
+                console.log('[MATERIALS:MDL] No diffuseColor constant found, keeping default:', mat.color.getHexString());
+            }
         }
 
         const loadTex = async (asset: string, cfg?: (t: THREE.Texture) => void): Promise<THREE.Texture | null> => {
@@ -342,73 +556,92 @@ export function createMdlSourceAssetMaterial(opts: {
         // Base color
         if (mdl.textures.baseColor) {
             console.log('[MATERIALS:MDL] Loading baseColor texture:', mdl.textures.baseColor);
-            const tex = await loadTex(mdl.textures.baseColor, (t) => {
-                configureColorTexture(t);
-                t.wrapS = THREE.RepeatWrapping;
-                t.wrapT = THREE.RepeatWrapping;
-            });
-            if (tex) {
-                console.log('[MATERIALS:MDL] BaseColor texture loaded successfully, texture:', tex, 'material:', mat);
-                // Ensure texture is fully configured and ready
-                tex.needsUpdate = true;
-                // Wait for texture to be ready before applying
+            const url = resolveAssetUrl(mdl.textures.baseColor);
+            console.log('[MATERIALS:MDL] Resolved baseColor URL:', url);
+            if (url) {
+                console.log('[MATERIALS:MDL] Calling loadTextureToMaterialSlot for baseColor');
+                await loadTextureToMaterialSlot({
+                    mat,
+                    slot: 'map',
+                    url,
+                    debugName: 'MDL:baseColor',
+                    configure: (t) => {
+                        console.log('[MATERIALS:MDL] Configuring baseColor texture:', t);
+                        configureColorTexture(t);
+                        t.wrapS = THREE.RepeatWrapping;
+                        t.wrapT = THREE.RepeatWrapping;
+                    },
+                });
+                console.log('[MATERIALS:MDL] loadTextureToMaterialSlot completed for baseColor, mat.map:', mat.map);
                 deferTextureApply(() => {
-                    console.log('[MATERIALS:MDL] Applying baseColor texture to material:', mat.name, 'texture:', tex.uuid);
-                    // Dispose old texture if exists and different
-                    if (mat.map && mat.map !== tex && mat.map.uuid !== tex.uuid) {
-                        console.log('[MATERIALS:MDL] Disposing old texture:', mat.map.uuid);
-                        mat.map.dispose();
-                    }
-                    // Assign texture and configure material
-                    mat.map = tex;
+                    console.log('[MATERIALS:MDL] Applying baseColor texture, setting color to white, mat.map:', mat.map);
                     mat.color.setHex(0xffffff);
-                    // Ensure texture is marked for update
-                    tex.needsUpdate = true;
-                    // Force material update - this is critical for Three.js to pick up the change
                     mat.needsUpdate = true;
-                    // Verify the assignment
-                    console.log('[MATERIALS:MDL] Applied baseColor texture - mat.map:', mat.map?.uuid, 'mat.color:', mat.color.getHexString(), 'mat.needsUpdate:', mat.needsUpdate);
+                    console.log('[MATERIALS:MDL] After texture apply, mat.map:', mat.map, 'mat.color:', mat.color.getHexString());
                 });
             } else {
-                console.warn('[MATERIALS:MDL] Failed to load baseColor texture:', mdl.textures.baseColor);
+                console.warn('[MATERIALS:MDL] Failed to resolve baseColor URL');
             }
         } else {
-            console.log('[MATERIALS:MDL] No baseColor texture found in MDL');
+            console.log('[MATERIALS:MDL] No baseColor texture found');
         }
 
         // Normal map
         if (mdl.textures.normal) {
-            const tex = await loadTex(mdl.textures.normal, (t) => {
-                configureLinearTexture(t);
-                t.wrapS = THREE.RepeatWrapping;
-                t.wrapT = THREE.RepeatWrapping;
-            });
-            if (tex) {
-                deferTextureApply(() => {
-                    mat.normalMap = tex;
-                    mat.needsUpdate = true;
+            const url = resolveAssetUrl(mdl.textures.normal);
+            if (url) {
+                await loadTextureToMaterialSlot({
+                    mat,
+                    slot: 'normalMap',
+                    url,
+                    debugName: 'MDL:normal',
+                    configure: (t) => {
+                        configureLinearTexture(t);
+                        t.wrapS = THREE.RepeatWrapping;
+                        t.wrapT = THREE.RepeatWrapping;
+                    },
                 });
             }
         }
 
-        // ORM: Three uses G for roughness, B for metalness. This aligns with common ORM conventions.
+        // ORM: Three uses G for roughness, B for metalness, R for AO.
         if (mdl.textures.orm) {
-            const tex = await loadTex(mdl.textures.orm, (t) => {
-                configureLinearTexture(t);
-                t.wrapS = THREE.RepeatWrapping;
-                t.wrapT = THREE.RepeatWrapping;
-            });
-            if (tex) {
-                deferTextureApply(() => {
-                    mat.roughness = 1.0;
-                    mat.metalness = 1.0;
-                    mat.roughnessMap = tex;
-                    mat.metalnessMap = tex;
-                    // NOTE: aoMap requires uv2; we patch geometry to alias uv->uv2 when present.
-                    mat.aoMap = tex;
-                    mat.aoMapIntensity = 1.0;
-                    mat.needsUpdate = true;
-                });
+            const url = resolveAssetUrl(mdl.textures.orm);
+            if (url) {
+                const isUdim = url.includes('<UDIM>') || url.toLowerCase().includes('%3cudim%3e');
+                if (isUdim) {
+                    const set = await getOrLoadUdimTextureSet(url, (t) => {
+                        configureLinearTexture(t);
+                        t.wrapS = THREE.RepeatWrapping;
+                        t.wrapT = THREE.RepeatWrapping;
+                    });
+                    if (set && set.tiles.length) {
+                        deferTextureApply(() => {
+                            mat.roughness = 1.0;
+                            mat.metalness = 1.0;
+                            // IMPORTANT: packed ORM (R=AO, G=Roughness, B=Metalness). Sample UDIM tiles once.
+                            applyUdimPackedOrmSampling(mat, set, { debugName: 'MDL:ormPacked' });
+                            mat.aoMapIntensity = 1.0;
+                            mat.needsUpdate = true;
+                        });
+                    }
+                } else {
+                    const tex = await getOrLoadTextureClone(url, (t) => {
+                        configureLinearTexture(t);
+                        t.wrapS = THREE.RepeatWrapping;
+                        t.wrapT = THREE.RepeatWrapping;
+                    });
+                    deferTextureApply(() => {
+                        mat.roughness = 1.0;
+                        mat.metalness = 1.0;
+                        mat.roughnessMap = tex;
+                        mat.metalnessMap = tex;
+                        // NOTE: aoMap requires uv2; we patch geometry to alias uv->uv2 when present.
+                        mat.aoMap = tex;
+                        mat.aoMapIntensity = 1.0;
+                        mat.needsUpdate = true;
+                    });
+                }
             }
         } else {
             // If no ORM, apply scalar constants if present.

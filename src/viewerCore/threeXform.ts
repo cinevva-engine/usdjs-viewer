@@ -123,6 +123,10 @@ export function parseMatrix4d(v: SdfValue | undefined): THREE.Matrix4 | null {
 }
 
 export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: number, unitScale = 1.0) {
+    // OpenUSD note: metersPerUnit is a stage metric and should not be baked into xform evaluation.
+    // XformOps compose purely from authored values. Keep `unitScale` for legacy call sites but
+    // do not apply it to xformOp matrices.
+    void unitScale;
     // Helper to get property value, optionally at a specific time
     const getVal = time !== undefined
         ? (name: string) => getPrimPropAtTime(prim, name, time)
@@ -154,17 +158,8 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
 
     const isTranslateLike = (opName: string): boolean => {
         // Most translations are authored as `xformOp:translate:*`.
-        //
-        // usd-wg-assets schema test `complex_transform.usda` also uses the names:
-        // - `xformOp:rotateXYZ:rotateOffset` (float3)
-        // - `xformOp:scale:scaleOffset` (float3)
-        // as translation-like offsets in the stack.
-        //
-        // Treat those as translations for compatibility with the corpus reference renders.
         return (
-            opName.startsWith('xformOp:translate') ||
-            opName.endsWith(':rotateOffset') ||
-            opName.endsWith(':scaleOffset')
+            opName.startsWith('xformOp:translate')
         );
     };
 
@@ -173,11 +168,6 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         if (opName.startsWith('xformOp:transform')) {
             const m = parseMatrix4d(getVal(opName));
             if (!m) return null;
-            if (unitScale !== 1.0) {
-                m.elements[12]! *= unitScale;
-                m.elements[13]! *= unitScale;
-                m.elements[14]! *= unitScale;
-            }
             return m;
         }
 
@@ -185,10 +175,7 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         if (isTranslateLike(opName)) {
             const v = vec3For(opName);
             if (!v) return null;
-            const tx = v[0] * unitScale;
-            const ty = v[1] * unitScale;
-            const tz = v[2] * unitScale;
-            return new THREE.Matrix4().makeTranslation(tx, ty, tz);
+            return new THREE.Matrix4().makeTranslation(v[0], v[1], v[2]);
         }
 
         // Scale
@@ -329,33 +316,50 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         [0, 0, 0, 1],
     ]);
 
+    // Row-vector rotation matrices (right-handed).
+    // These are constructed directly (instead of deriving from Three.js) to match OpenUSD behavior.
     const usdRotateXRows = (deg: number): UsdRows4 => {
-        // Keep rotation semantics consistent with the non-matrix path (matrixForOp),
-        // which already matches usd-wg-assets for simple_transform.
-        // We build the Three.js (column-vector) rotation matrix, then transpose to USD rows.
-        const mCol = new THREE.Matrix4().makeRotationX(THREE.MathUtils.degToRad(deg));
-        return threeMatrixToUsdRows(mCol);
+        const t = THREE.MathUtils.degToRad(deg);
+        const c = Math.cos(t);
+        const s = Math.sin(t);
+        return [
+            [1, 0, 0, 0],
+            [0, c, s, 0],
+            [0, -s, c, 0],
+            [0, 0, 0, 1],
+        ];
     };
 
     const usdRotateYRows = (deg: number): UsdRows4 => {
-        const mCol = new THREE.Matrix4().makeRotationY(THREE.MathUtils.degToRad(deg));
-        return threeMatrixToUsdRows(mCol);
+        const t = THREE.MathUtils.degToRad(deg);
+        const c = Math.cos(t);
+        const s = Math.sin(t);
+        return [
+            [c, 0, -s, 0],
+            [0, 1, 0, 0],
+            [s, 0, c, 0],
+            [0, 0, 0, 1],
+        ];
     };
 
     const usdRotateZRows = (deg: number): UsdRows4 => {
-        const mCol = new THREE.Matrix4().makeRotationZ(THREE.MathUtils.degToRad(deg));
-        return threeMatrixToUsdRows(mCol);
+        const t = THREE.MathUtils.degToRad(deg);
+        const c = Math.cos(t);
+        const s = Math.sin(t);
+        return [
+            [c, s, 0, 0],
+            [-s, c, 0, 0],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ];
     };
 
     const usdRotateXYZRows = (degX: number, degY: number, degZ: number): UsdRows4 => {
-        const e = new THREE.Euler(
-            THREE.MathUtils.degToRad(degX),
-            THREE.MathUtils.degToRad(degY),
-            THREE.MathUtils.degToRad(degZ),
-            'XYZ',
-        );
-        const mCol = new THREE.Matrix4().makeRotationFromEuler(e);
-        return threeMatrixToUsdRows(mCol);
+        // Match OpenUSD: rotateXYZ composes as X then Y then Z for row-vectors: M = Rx * Ry * Rz
+        const rx = usdRotateXRows(degX);
+        const ry = usdRotateYRows(degY);
+        const rz = usdRotateZRows(degZ);
+        return usdMulRows(usdMulRows(rx, ry), rz);
     };
 
     const usdRowsForOp = (opName: string): UsdRows4 | null => {
@@ -363,11 +367,6 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         if (opName.startsWith('xformOp:transform')) {
             const rows = readUsdMatrixRows(getVal(opName));
             if (!rows) return null;
-            if (unitScale !== 1.0) {
-                rows[3][0] *= unitScale;
-                rows[3][1] *= unitScale;
-                rows[3][2] *= unitScale;
-            }
             return rows;
         }
 
@@ -375,7 +374,7 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         if (isTranslateLike(opName)) {
             const v = vec3For(opName);
             if (!v) return null;
-            return usdTranslateRows(v[0] * unitScale, v[1] * unitScale, v[2] * unitScale);
+            return usdTranslateRows(v[0], v[1], v[2]);
         }
 
         if (opName.startsWith('xformOp:scale')) {
@@ -407,49 +406,40 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
         return null;
     };
 
-    // Fast-path: the common TRS order (translate, rotateXYZ, scale) should map cleanly to Three.js.
-    // This keeps simple samples (like usd-wg-assets `simple_transform.usda`) behaving predictably
-    // while we iterate on full xformOpOrder matrix semantics for complex pivot/shear stacks.
-    const isSimpleTrsOrder = (ops: string[]): boolean => {
-        if (ops.length !== 3) return false;
-        // Ignore `!invert!` (not expected in simple TRS)
-        if (ops.some((t) => t.startsWith('!invert!'))) return false;
-        const [a, b, c] = ops;
-        if (!a || !b || !c) return false;
-        return a.startsWith('xformOp:translate') && b.startsWith('xformOp:rotateXYZ') && c.startsWith('xformOp:scale');
-    };
-
-    if (isSimpleTrsOrder(order)) {
-        obj.matrixAutoUpdate = true;
-        obj.position.set(0, 0, 0);
-        obj.rotation.set(0, 0, 0);
-        obj.quaternion.identity();
-        obj.scale.set(1, 1, 1);
-
-        const t = vec3For(order[0]!);
-        const r = vec3For(order[1]!);
-        const s = vec3For(order[2]!);
-
-        if (t) obj.position.set(t[0] * unitScale, t[1] * unitScale, t[2] * unitScale);
-        if (s) obj.scale.set(s[0], s[1], s[2]);
-        if (r) {
-            obj.rotation.set(
-                THREE.MathUtils.degToRad(r[0]),
-                THREE.MathUtils.degToRad(r[1]),
-                THREE.MathUtils.degToRad(r[2]),
-                'XYZ'
-            );
-        }
-        obj.updateMatrix();
-        return;
-    }
+    // NOTE: do not use a TRS fast-path: even "simple" stacks must match OpenUSD's row-vector
+    // composition rules exactly, and going through a single matrix path avoids subtle Euler
+    // order/sign differences across conventions.
 
     // If xformOpOrder is present, honor it by composing a full matrix stack.
     // Compose in USD convention (row-vectors) and transpose once into Three.
     if (order.length) {
         let composedRows: UsdRows4 = usdIdentityRows();
         let any = false;
-        for (const token of order) {
+        const invertPrefix = '!invert!';
+        const resetToken = '!resetXformStack!';
+        const areInverseTokens = (a: string, b: string): boolean =>
+            (invertPrefix + a) === b || (invertPrefix + b) === a;
+
+        for (let i = 0; i < order.length; i++) {
+            const token = order[i]!;
+            // OpenUSD: "!resetXformStack!" clears the currently accreted ops.
+            // (It is meaningful even if it doesn't appear first; the last occurrence wins.)
+            if (token === resetToken) {
+                composedRows = usdIdentityRows();
+                any = true;
+                continue;
+            }
+
+            // OpenUSD: if two adjacent tokens are inverses of each other, skip BOTH.
+            // Pixar detects this while iterating in reverse (most-local -> least-local).
+            // Since we iterate forward, we must look ahead so we don't apply the first op and
+            // then only skip the second.
+            const nextToken = i + 1 < order.length ? order[i + 1]! : null;
+            if (nextToken && areInverseTokens(token, nextToken)) {
+                i++; // skip the paired inverse token too
+                continue;
+            }
+
             let invert = false;
             let opName = token;
             if (opName.startsWith('!invert!')) {
@@ -523,7 +513,7 @@ export function applyXformOps(obj: THREE.Object3D, prim: SdfPrimSpec, time?: num
     obj.quaternion.identity();
     obj.scale.set(1, 1, 1);
 
-    if (t) obj.position.set(t[0] * unitScale, t[1] * unitScale, t[2] * unitScale);
+    if (t) obj.position.set(t[0], t[1], t[2]);
     if (s) obj.scale.set(s[0], s[1], s[2]);
 
     const rXYZ = vec3For(rName);

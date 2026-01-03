@@ -28,7 +28,7 @@ import { applyRenderSettings as applyRenderSettingsExternal, ensurePost as ensur
 import { advanceAnimationPlayback, applyAnimatedObjectsAtTime } from './animationPlayback';
 import { getThreeDebugInfo as getThreeDebugInfoExternal } from './threeDebug';
 import { getGpuResourcesInfo as getGpuResourcesInfoExternal } from './gpuResources';
-import { buildThreeSceneTree, findObjectByUuid, getObjectProperties, setObjectProperty, EDITABLE_PROPERTIES, parseMaterialKey, findMaterialByKey, getMaterialProperties, setMaterialProperty, parseTextureKey, findTextureByKey, getTextureProperties, setTextureProperty } from './threeSceneTree';
+import { buildThreeSceneTree, findObjectByUuid, getObjectProperties, setObjectProperty, EDITABLE_PROPERTIES, parseMaterialKey, findMaterialByKey, getMaterialProperties, setMaterialProperty, parseTextureKey, findTextureByKey, getTextureProperties, setTextureProperty, findTextureByUuid as findTextureByUuidExternal } from './threeSceneTree';
 import { createDomeEnvironmentController } from './domeEnvironment';
 import { loadCorpusEntryExternal } from './corpusEntry';
 import { createRunPipeline } from './runPipeline';
@@ -748,20 +748,52 @@ export function createViewerCore(opts: {
         // Find any lights under this container
         obj.traverse((child) => {
           if ((child as any).isLight) {
-            const light = child as THREE.Light;
-            // USD intensity needs conversion based on light type
             const typeName = node.typeName;
+            // UsdLux intensity/exposure:
+            // - intensity scales brightness linearly
+            // - exposure scales brightness as a power of 2
+            const exposureProp = prim.properties?.get('inputs:exposure')?.defaultValue ?? prim.properties?.get('exposure')?.defaultValue;
+            const exposureVal = typeof exposureProp === 'number' ? exposureProp : 0;
+            const intensityBase = value * Math.pow(2, exposureVal);
+
+            // Apply spec-based conversions per light type (no empirical calibration constants).
             if (typeName === 'DistantLight') {
-              light.intensity = value / 1000;
-            } else if (typeName === 'SphereLight' || typeName === 'RectAreaLight') {
-              // Approximate conversion for point/spot/area lights
-              const exposureProp = prim.properties?.get('exposure')?.defaultValue;
-              const exposureVal = typeof exposureProp === 'number' ? exposureProp : 0;
-              const intensityBase = value * Math.pow(2, exposureVal);
-              light.intensity = intensityBase / 8000;
-            } else {
-              light.intensity = value / 1000;
+              // DirectionalLight intensity is treated as illuminance (lux) under physically-correct lights.
+              (child as THREE.Light).intensity = intensityBase;
+              return;
             }
+
+            if (typeName === 'RectLight' && (child as any).isRectAreaLight) {
+              const widthProp = prim.properties?.get('inputs:width')?.defaultValue ?? prim.properties?.get('width')?.defaultValue;
+              const heightProp = prim.properties?.get('inputs:height')?.defaultValue ?? prim.properties?.get('height')?.defaultValue;
+              const normalizeProp = prim.properties?.get('inputs:normalize')?.defaultValue ?? prim.properties?.get('normalize')?.defaultValue;
+              const widthStage = typeof widthProp === 'number' ? widthProp : 1.0;
+              const heightStage = typeof heightProp === 'number' ? heightProp : 1.0;
+              const normalize = typeof normalizeProp === 'boolean' ? normalizeProp : (typeof normalizeProp === 'number' ? normalizeProp !== 0 : false);
+              const widthWorld = widthStage * stageUnitScale;
+              const heightWorld = heightStage * stageUnitScale;
+              const area = Math.max(0, widthWorld) * Math.max(0, heightWorld);
+              const L = normalize && area > 0 ? intensityBase / area : intensityBase; // luminance (cd/m^2)
+              (child as THREE.RectAreaLight).intensity = L;
+              return;
+            }
+
+            if (typeName === 'SphereLight' && ((child as any).isPointLight || (child as any).isSpotLight)) {
+              const radiusProp = prim.properties?.get('inputs:radius')?.defaultValue ?? prim.properties?.get('radius')?.defaultValue;
+              const normalizeProp = prim.properties?.get('inputs:normalize')?.defaultValue ?? prim.properties?.get('normalize')?.defaultValue;
+              const radiusStage = typeof radiusProp === 'number' ? radiusProp : 0.0;
+              const normalize = typeof normalizeProp === 'boolean' ? normalizeProp : (typeof normalizeProp === 'number' ? normalizeProp !== 0 : false);
+              const r = Math.max(0, radiusStage * stageUnitScale);
+              const surfaceArea = 4 * Math.PI * r * r;
+              const L = normalize && surfaceArea > 0 ? intensityBase / surfaceArea : intensityBase; // luminance (cd/m^2)
+              const Aproj = Math.PI * r * r;
+              const Icd = L * Aproj; // candela
+              (child as THREE.Light).intensity = Icd;
+              return;
+            }
+
+            // Fallback: treat as direct pass-through in physically-correct Three.js units.
+            (child as THREE.Light).intensity = intensityBase;
           }
         });
       }
@@ -887,20 +919,50 @@ export function createViewerCore(opts: {
       }
 
       // Recalculate intensity with new exposure
-      const intensityProp = prim.properties?.get('intensity')?.defaultValue;
+      const intensityProp = prim.properties?.get('inputs:intensity')?.defaultValue ?? prim.properties?.get('intensity')?.defaultValue;
       const baseIntensity = typeof intensityProp === 'number' ? intensityProp : 1.0;
       const newIntensity = baseIntensity * Math.pow(2, value);
 
       for (const obj of objects) {
         obj.traverse((child) => {
           if ((child as any).isLight) {
-            const light = child as THREE.Light;
             const typeName = node.typeName;
+
             if (typeName === 'DistantLight') {
-              light.intensity = newIntensity / 1000;
-            } else {
-              light.intensity = newIntensity / 8000;
+              (child as THREE.Light).intensity = newIntensity;
+              return;
             }
+
+            if (typeName === 'RectLight' && (child as any).isRectAreaLight) {
+              const widthProp = prim.properties?.get('inputs:width')?.defaultValue ?? prim.properties?.get('width')?.defaultValue;
+              const heightProp = prim.properties?.get('inputs:height')?.defaultValue ?? prim.properties?.get('height')?.defaultValue;
+              const normalizeProp = prim.properties?.get('inputs:normalize')?.defaultValue ?? prim.properties?.get('normalize')?.defaultValue;
+              const widthStage = typeof widthProp === 'number' ? widthProp : 1.0;
+              const heightStage = typeof heightProp === 'number' ? heightProp : 1.0;
+              const normalize = typeof normalizeProp === 'boolean' ? normalizeProp : (typeof normalizeProp === 'number' ? normalizeProp !== 0 : false);
+              const widthWorld = widthStage * stageUnitScale;
+              const heightWorld = heightStage * stageUnitScale;
+              const area = Math.max(0, widthWorld) * Math.max(0, heightWorld);
+              const L = normalize && area > 0 ? newIntensity / area : newIntensity;
+              (child as THREE.RectAreaLight).intensity = L;
+              return;
+            }
+
+            if (typeName === 'SphereLight' && ((child as any).isPointLight || (child as any).isSpotLight)) {
+              const radiusProp = prim.properties?.get('inputs:radius')?.defaultValue ?? prim.properties?.get('radius')?.defaultValue;
+              const normalizeProp = prim.properties?.get('inputs:normalize')?.defaultValue ?? prim.properties?.get('normalize')?.defaultValue;
+              const radiusStage = typeof radiusProp === 'number' ? radiusProp : 0.0;
+              const normalize = typeof normalizeProp === 'boolean' ? normalizeProp : (typeof normalizeProp === 'number' ? normalizeProp !== 0 : false);
+              const r = Math.max(0, radiusStage * stageUnitScale);
+              const surfaceArea = 4 * Math.PI * r * r;
+              const L = normalize && surfaceArea > 0 ? newIntensity / surfaceArea : newIntensity;
+              const Aproj = Math.PI * r * r;
+              const Icd = L * Aproj;
+              (child as THREE.Light).intensity = Icd;
+              return;
+            }
+
+            (child as THREE.Light).intensity = newIntensity;
           }
         });
       }
@@ -1243,6 +1305,10 @@ export function createViewerCore(opts: {
       const tex = findTextureByKey(scene, key);
       if (!tex) return false;
       return setTextureProperty(tex, path, value);
+    },
+
+    findTextureByUuid: (uuid: string) => {
+      return findTextureByUuidExternal(scene, uuid);
     },
 
     raycastAtNDC: (ndcX: number, ndcY: number): string | null => {

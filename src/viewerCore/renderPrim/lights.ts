@@ -69,6 +69,13 @@ export function renderUsdLightPrim(opts: {
       }
       return fallback;
     };
+    const getNumberOrUndefined = (names: string[]): number | undefined => {
+      for (const n of names) {
+        const v = getPrimProp(prim, n);
+        if (typeof v === 'number') return v;
+      }
+      return undefined;
+    };
     const getBool = (names: string[], fallback: boolean): boolean => {
       for (const n of names) {
         const v = getPrimProp(prim, n);
@@ -78,10 +85,20 @@ export function renderUsdLightPrim(opts: {
       return fallback;
     };
 
-    // UsdLux attributes are typically authored as `intensity`, `color`, `angle` (no inputs: prefix).
-    // Some pipelines may author as `inputs:intensity` etc. Support both.
-    const intensityVal = getNumber(['inputs:intensity', 'intensity'], 1.0);
-    const exposureVal = getNumber(['inputs:exposure', 'exposure'], 0.0);
+    // UsdLux LightAPI:
+    // - intensity scales brightness linearly
+    // - exposure scales brightness exponentially as a power of 2
+    //
+    // Important nuance: some assets intentionally omit intensity/exposure so that viewers can pick
+    // their own defaults (see McUsd). In that case, we should not "convert" an arbitrary USD-space
+    // fallback value via an additional scaling constant. Instead we pick a viewer default in
+    // Three.js units and only apply USD→Three conversions when values are authored.
+    //
+    // For now we keep viewer defaults simple: intensity=1, exposure=0 when missing.
+    const intensityAuthored = getNumberOrUndefined(['inputs:intensity', 'intensity']);
+    const exposureAuthored = getNumberOrUndefined(['inputs:exposure', 'exposure']);
+    const intensityVal = intensityAuthored ?? 1.0;
+    const exposureVal = exposureAuthored ?? 0.0;
     const intensityBase = intensityVal * Math.pow(2, exposureVal);
 
     const colorProp = getPrimProp(prim, 'inputs:color') ?? getPrimProp(prim, 'color');
@@ -94,7 +111,10 @@ export function renderUsdLightPrim(opts: {
     }
 
     if (typeName === 'DistantLight') {
-      const light = new THREE.DirectionalLight(lightColor, intensityBase / 1000);
+      // Three.js physically-correct lights: DirectionalLight intensity is treated as illuminance (lux).
+      // We interpret UsdLux DistantLight intensity/exposure as the same quantity and pass through.
+      // (No arbitrary calibration constants.)
+      const light = new THREE.DirectionalLight(lightColor, intensityBase);
 
       const angleVal = getNumber(['inputs:angle', 'angle'], 0.53);
 
@@ -161,32 +181,28 @@ export function renderUsdLightPrim(opts: {
       const coneSoftnessVal = getNumber(['inputs:shaping:cone:softness', 'shaping:cone:softness'], 0.0);
       const normalize = getBool(['inputs:normalize', 'normalize'], false);
 
-      // USD LightAPI defines intensity/exposure as emitted luminance in nits (cd/m^2):
-      //   L = intensity * 2^exposure   (see OpenUSD `UsdLuxLightAPI`)
-      // Three.js (physically-correct lights) expects PointLight/SpotLight intensity in candela (cd).
-      // A practical approximation for a uniformly-emitting sphere is:
-      //   I_cd ≈ L * A_proj, where A_proj = π r^2 (projected area).
+      // UsdLuxLightAPI::normalize:
+      // "Normalize the emission such that the power of the light remains constant while altering
+      // the size of the light, by dividing the luminance by the world-space surface area of the light."
       //
-      // Note: OpenUSD `inputs:normalize` (if enabled) divides luminance by world-space surface area.
-      // For SphereLight, that means L /= (4πr^2), making the total power invariant w.r.t. radius.
+      // Interpreting intensityBase as luminance \(L\) (cd/m^2), a uniformly-emitting sphere has
+      // luminous intensity along its axis:
+      //   I (cd) = L * A_proj, where A_proj = π r^2.
       //
-      // We keep a single empirical scaling constant so the ft-lab sample corpus fits within the
-      // viewer's exposure/tonemapping without blowing out.
+      // If normalize=true, we first divide luminance by the sphere surface area:
+      //   L' = L / (4πr^2)
+      //   I  = L' * (πr^2) = L / 4
       //
-      // NOTE: Earlier versions of this viewer effectively behaved like:
-      //   I ≈ (intensity * r^2) / K
-      // Switching to A_proj (= π r^2) introduces an extra factor of π and makes the corpus look too bright.
-      // Fold that π into the scale constant so we preserve the intended brightness.
-      const GLOBAL_NITS_TO_THREE = 8000 * Math.PI; // empirical scale for this viewer (tuned for ft-lab light samples)
+      // This is unit-consistent and contains no viewer-specific calibration factors.
       const r = Math.max(0, radiusVal);
       const surfaceArea = 4 * Math.PI * r * r;
-      const L = normalize && surfaceArea > 0 ? intensityBase / surfaceArea : intensityBase; // nits (cd/m^2)
+      const L = normalize && surfaceArea > 0 ? intensityBase / surfaceArea : intensityBase; // luminance (cd/m^2)
       const Aproj = Math.PI * r * r;
-      const sphereIntensity = (L * Aproj) / GLOBAL_NITS_TO_THREE; // candela-ish
+      const sphereIntensityCd = L * Aproj; // candela
 
       // If shaping cone is less than 180°, approximate with a SpotLight.
       if (coneAngleVal < 179.9) {
-        const light = new THREE.SpotLight(lightColor, sphereIntensity, 1000);
+        const light = new THREE.SpotLight(lightColor, sphereIntensityCd, 1000);
         // IMPORTANT: Three.js SpotLight defaults to position (0,1,0).
         // In USD, the light is located at the prim origin; leaving the default introduces an unintended
         // offset which makes the light appear to "tilt" (direction becomes from (0,1,0) → target).
@@ -232,7 +248,7 @@ export function renderUsdLightPrim(opts: {
         helpersParent.add(helper);
         dynamicHelperUpdates.push(() => helper.update());
       } else {
-        const light = new THREE.PointLight(lightColor, sphereIntensity, 1000);
+        const light = new THREE.PointLight(lightColor, sphereIntensityCd, 1000);
         light.position.set(0, 0, 0);
         // USD lights have no finite range cutoff; Three's `distance=0` means infinite.
         (light as any).distance = 0;
@@ -258,15 +274,14 @@ export function renderUsdLightPrim(opts: {
       hasUsdLightsRef.value = true;
     } else if (typeName === 'RectLight') {
       // RectAreaLight exists in Three.js (a "square light" is just width == height).
-      // Three's RectAreaLight intensity is in nits (see RectAreaLight.power getter/setter),
-      // matching USD LightAPI's intensity/exposure being luminance in nits (cd/m^2).
+      // In Three.js physically-correct mode, RectAreaLight intensity is treated as luminance (cd/m^2).
       const widthVal = getNumber(['inputs:width', 'width'], 1.0) * unitScale;
       const heightVal = getNumber(['inputs:height', 'height'], 1.0) * unitScale;
       const normalize = getBool(['inputs:normalize', 'normalize'], false);
       const area = Math.max(0, widthVal) * Math.max(0, heightVal);
-      const L = normalize && area > 0 ? intensityBase / area : intensityBase; // nits (cd/m^2)
-      const USD_NITS_TO_THREE_NITS = 8000; // viewer calibration constant (keep consistent with SphereLight mapping)
-      const threeIntensity = L / USD_NITS_TO_THREE_NITS;
+      // If normalize=true, divide luminance by emitting surface area (world-space).
+      const L = normalize && area > 0 ? intensityBase / area : intensityBase; // luminance (cd/m^2)
+      const threeIntensity = L;
       if (USDDEBUG) dbg('[RectLight]', prim.path?.primPath, {
         usdIntensity: intensityBase,
         normalize,
@@ -396,7 +411,9 @@ export function renderUsdLightPrim(opts: {
           }
         }
 
-        const light = new THREE.HemisphereLight(lightColor, new THREE.Color(0x000000), intensityBase / 1000);
+        // HemisphereLight is a non-physical fallback; still keep intensity in the same scale
+        // as our physically-correct directional light path (no arbitrary calibration).
+        const light = new THREE.HemisphereLight(lightColor, new THREE.Color(0x000000), intensityBase);
         container.add(light);
       }
       hasUsdLightsRef.value = true;

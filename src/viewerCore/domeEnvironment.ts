@@ -115,10 +115,16 @@ export function createDomeEnvironmentController(opts: {
       const eFinal = new THREE.Euler().setFromQuaternion(qCoordConv, 'XYZ');
       scene.environmentRotation.copy(eFinal);
       scene.backgroundRotation.copy(eFinal);
-      // USD intensity is luminance in nits (cd/m^2). Three.js Scene.environmentIntensity is a unitless scalar,
-      // so we keep using the viewer calibration constant used for other nits-based lights.
-      const USD_NITS_TO_THREE = 8000;
-      scene.environmentIntensity = intensity / USD_NITS_TO_THREE;
+      // DomeLight intensity/exposure acts as a multiplier for emitted environment lighting.
+      //
+      // Three.js Scene.environmentIntensity is a unitless scalar applied to IBL lighting.
+      // Since the absolute radiometric calibration of HDR/EXR pixel values is generally unknown
+      // (and USD assets also vary across pipelines), there is no universally "correct" physical
+      // conversion from a real-world luminance (cd/m^2) to this scalar without additional metadata.
+      //
+      // What we *can* do correctly and consistently is: treat USD intensity/exposure as the intended
+      // authored multiplier and apply it directly, without any viewer-specific calibration constant.
+      scene.environmentIntensity = intensity;
       // IMPORTANT: backgroundIntensity controls the visual brightness of the skybox/backdrop.
       // Unlike environmentIntensity (which scales IBL contribution to object lighting),
       // the background should NOT be dimmed by scene lighting calibration.

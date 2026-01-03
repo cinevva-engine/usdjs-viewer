@@ -3,8 +3,16 @@ import type { PrimeTreeNode, SceneNode } from './types';
 
 export function buildTree(root: SdfPrimSpec): SceneNode {
     const isActiveLocal = (p: SdfPrimSpec): boolean => (p.metadata as any)?.active !== false;
+    const isInternalPrototype = (p: SdfPrimSpec): boolean => {
+        const path = p.path?.toString?.() ?? '';
+        return path.startsWith('/__usdjs_prototypes');
+    };
 
     const walk = (p: SdfPrimSpec, ancestorsActive: boolean): SceneNode | null => {
+        // Internal implementation detail: prototypes materialized for instanceable external references.
+        // These should not appear in the scene tree or be rendered as top-level prims; instances reference
+        // them via internal sdfpath arcs and are expanded/rendered under the instance prim.
+        if (isInternalPrototype(p)) return null;
         const selfActive = ancestorsActive && isActiveLocal(p);
         if (!selfActive) return null;
         const children = Array.from(p.children?.values() ?? [])

@@ -1,7 +1,18 @@
-import { resolveAssetPath } from '@cinevva/usdjs';
+import { resolveAssetPath, type SdfLayer } from '@cinevva/usdjs';
+
+// Max binary file size to attempt parsing in the resolver (for composition)
+// With optimized clone (SdfPath.primUnsafe), we can handle larger files
+const MAX_BINARY_PARSE_SIZE = 200 * 1024 * 1024; // 200MB
+
+// Resolver result - can return text (USDA) or pre-parsed layer (USDC/USDZ)
+export type ResolverResult = {
+    identifier: string;
+    text?: string;
+    layer?: SdfLayer;
+};
 
 export type TextResolver = {
-    readText(assetPath: string, fromIdentifier?: string): Promise<{ identifier: string; text: string }>;
+    readText(assetPath: string, fromIdentifier?: string): Promise<ResolverResult>;
 };
 
 export function createTextResolver(opts: {
@@ -10,7 +21,7 @@ export function createTextResolver(opts: {
 }): TextResolver {
     const { externalFiles, dbg } = opts;
 
-    const textCache = new Map<string, { identifier: string; text: string }>();
+    const textCache = new Map<string, ResolverResult>();
     const readHits = new Map<string, number>();
     return {
         async readText(assetPath: string, fromIdentifier?: string) {
@@ -152,17 +163,31 @@ export function createTextResolver(opts: {
             // Try exact matches for both raw and `[corpus]`-prefixed keys.
             const exact = externalFiles.get(resolved) ?? externalFiles.get(`[corpus]${resolved}`);
             if (exact) {
-                // If it's a binary file, we need to convert it for the text resolver
-                // (composition still expects text format for referenced layers)
+                // If it's a binary file, parse it natively and return the layer directly
                 if (exact.binary) {
-                    // For binary files in composition, we still need text
-                    // This is a limitation - composition expects text format
-                    // In the future, we could update the resolver to support binary layers
-                    console.warn(`Binary file ${resolved} referenced in composition - conversion may be needed`);
-                    // Return empty layer for now (composition will skip it)
-                    const out = { identifier: resolved, text: '#usda 1.0\n' };
-                    textCache.set(resolved, out);
-                    return out;
+                    // Skip very large binary files to avoid memory issues
+                    if (exact.binary.byteLength > MAX_BINARY_PARSE_SIZE) {
+                        console.warn(`Skipping large binary file (${(exact.binary.byteLength / 1024 / 1024).toFixed(1)}MB > ${MAX_BINARY_PARSE_SIZE / 1024 / 1024}MB limit): ${resolved}`);
+                        return { identifier: resolved, text: '#usda 1.0\n' };
+                    }
+                    try {
+                        const data = new Uint8Array(exact.binary);
+                        const { parseUsdcToLayer, parseUsdzToLayer, isUsdzContent } = await import('@cinevva/usdjs');
+
+                        let layer;
+                        if (isUsdzContent(data)) {
+                            layer = await parseUsdzToLayer(data, { identifier: resolved });
+                        } else {
+                            layer = parseUsdcToLayer(data, { identifier: resolved });
+                        }
+
+                        // Return the parsed layer directly - no serialization needed!
+                        // NOTE: Don't cache the layer - stage.ts has its own layerCache
+                        return { identifier: resolved, layer };
+                    } catch (err: any) {
+                        console.warn(`Failed to parse binary file ${resolved}:`, err?.message || err);
+                        return { identifier: resolved, text: '#usda 1.0\n' };
+                    }
                 }
                 const out = { identifier: resolved, text: exact.text };
                 textCache.set(resolved, out);
@@ -171,12 +196,30 @@ export function createTextResolver(opts: {
             for (const [k, v] of externalFiles.entries()) {
                 // Be tolerant of corpus prefix and varying absolute-ish identifiers.
                 if (k.endsWith('/' + resolved) || k.endsWith(resolved) || k.endsWith(`/[corpus]${resolved}`) || k.endsWith(`[corpus]${resolved}`)) {
-                    // Handle binary files in composition
+                    // Handle binary files - parse natively and return layer directly
                     if (v.binary) {
-                        console.warn(`Binary file ${resolved} referenced in composition - conversion may be needed`);
-                        const out = { identifier: resolved, text: '#usda 1.0\n' };
-                        textCache.set(resolved, out);
-                        return out;
+                        // Skip very large binary files to avoid memory issues
+                        if (v.binary.byteLength > MAX_BINARY_PARSE_SIZE) {
+                            console.warn(`Skipping large binary file (${(v.binary.byteLength / 1024 / 1024).toFixed(1)}MB > ${MAX_BINARY_PARSE_SIZE / 1024 / 1024}MB limit): ${resolved}`);
+                            return { identifier: resolved, text: '#usda 1.0\n' };
+                        }
+                        try {
+                            const data = new Uint8Array(v.binary);
+                            const { parseUsdcToLayer, parseUsdzToLayer, isUsdzContent } = await import('@cinevva/usdjs');
+
+                            let layer;
+                            if (isUsdzContent(data)) {
+                                layer = await parseUsdzToLayer(data, { identifier: resolved });
+                            } else {
+                                layer = parseUsdcToLayer(data, { identifier: resolved });
+                            }
+
+                            // Return the parsed layer directly - stage.ts has its own caching
+                            return { identifier: resolved, layer };
+                        } catch (err: any) {
+                            console.warn(`Skipping binary file ${resolved} (parse failed):`, err?.message || err);
+                            return { identifier: resolved, text: '#usda 1.0\n' };
+                        }
                     }
                     const out = { identifier: resolved, text: v.text };
                     textCache.set(resolved, out);

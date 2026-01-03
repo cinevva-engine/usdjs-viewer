@@ -94,22 +94,36 @@ export function extractAssetPath(dv: any): { path: string; fromIdentifier: strin
     const stripCorpusPrefix = (v: string): string => 
         v.startsWith('[corpus]') ? v.replace('[corpus]', '') : v;
 
+    const USDDEBUG = typeof window !== 'undefined' && (
+        new URLSearchParams(window.location.search).get('usddebug') === '1' ||
+        window.localStorage?.getItem?.('usddebug') === '1'
+    );
+
+    let result: { path: string; fromIdentifier: string | null } | undefined;
+
     if (typeof dv === 'string') {
-        return { path: stripCorpusPrefix(dv), fromIdentifier: null };
-    }
-    
-    if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') {
+        result = { path: stripCorpusPrefix(dv), fromIdentifier: null };
+    } else if (dv && typeof dv === 'object' && dv.type === 'asset' && typeof dv.value === 'string') {
         const fromId = typeof dv.__fromIdentifier === 'string' ? stripCorpusPrefix(dv.__fromIdentifier) : null;
-        return { path: stripCorpusPrefix(dv.value), fromIdentifier: fromId };
-    }
-    
-    // usdjs may parse `@path@`-style authored values as a 'reference' SdfValue
-    if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') {
+        result = { path: stripCorpusPrefix(dv.value), fromIdentifier: fromId };
+    } else if (dv && typeof dv === 'object' && dv.type === 'reference' && typeof dv.assetPath === 'string') {
+        // usdjs may parse `@path@`-style authored values as a 'reference' SdfValue
         const fromId = typeof dv.__fromIdentifier === 'string' ? stripCorpusPrefix(dv.__fromIdentifier) : null;
-        return { path: stripCorpusPrefix(dv.assetPath), fromIdentifier: fromId };
+        result = { path: stripCorpusPrefix(dv.assetPath), fromIdentifier: fromId };
+    } else {
+        result = undefined;
     }
-    
-    return undefined;
+
+    if (USDDEBUG && result) {
+        console.log('[TEXTURE:extractAssetPath]', {
+            path: result.path,
+            fromIdentifier: result.fromIdentifier,
+            originalValue: dv,
+            type: typeof dv === 'object' ? dv.type : typeof dv,
+        });
+    }
+
+    return result;
 }
 
 /**

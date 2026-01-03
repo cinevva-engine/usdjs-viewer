@@ -6,6 +6,11 @@ export function frameToFit(opts: {
   contentRoot: THREE.Object3D;
   camera: THREE.PerspectiveCamera;
   controls: OrbitControls;
+  /**
+   * USD stage up axis. Affects only how we choose a nice *initial* camera offset direction.
+   * If omitted, we infer from camera.up (defaults to Y-up).
+   */
+  upAxis?: 'X' | 'Y' | 'Z';
 }): void {
   const { scene, contentRoot, camera, controls } = opts;
 
@@ -73,7 +78,21 @@ export function frameToFit(opts: {
   const distance = (maxDim / 2) / Math.tan(fov / 2) * 1.5; // 1.5x for some margin
 
   // Position camera at an angle (similar to default view angle)
-  const cameraOffset = new THREE.Vector3(0.5, 0.4, 0.75).normalize().multiplyScalar(distance);
+  // IMPORTANT: this direction must respect stage up axis; otherwise Z-up stages end up with a
+  // weird "rolled" starting view that makes OrbitControls feel broken.
+  const inferredUpAxis: 'X' | 'Y' | 'Z' =
+    opts.upAxis ??
+    (Math.abs(camera.up.x - 1) < 1e-6 ? 'X' : Math.abs(camera.up.z - 1) < 1e-6 ? 'Z' : 'Y');
+  // Y-up baseline: (x=0.5, up=0.4, depth=0.75) where depth=Z.
+  // Z-up: depth=Y (swap Y/Z roles)
+  // X-up: up=X, "side"=Y, depth=Z
+  const cameraOffsetDir =
+    inferredUpAxis === 'Z'
+      ? new THREE.Vector3(0.5, 0.75, 0.4)
+      : inferredUpAxis === 'X'
+        ? new THREE.Vector3(0.4, 0.5, 0.75)
+        : new THREE.Vector3(0.5, 0.4, 0.75);
+  const cameraOffset = cameraOffsetDir.normalize().multiplyScalar(distance);
   camera.position.copy(center).add(cameraOffset);
   controls.target.copy(center);
 

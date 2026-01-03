@@ -17,4 +17,13 @@ def Xform "World" {
 }
 `;
 
+export const EMPTY_USDA = `#usda 1.0
+(
+  defaultPrim = "World"
+  upAxis = "Y"
+  metersPerUnit = 0.01
+)
+def Xform "World" {}
+`;
+
 

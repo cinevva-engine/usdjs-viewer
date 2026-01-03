@@ -62,7 +62,8 @@ export function applyAnimatedObjectsAtTime(opts: {
   // Update all animated objects immediately
   for (const a of animatedObjects) {
     if (a.kind === 'xform') {
-      applyXformOps(a.obj, a.prim as SdfPrimSpec, time, a.unitScale);
+      // Xform evaluation should not apply metersPerUnit scaling.
+      applyXformOps(a.obj, a.prim as SdfPrimSpec, time, 1.0);
     } else if (a.kind === 'points') {
       const pts = parsePoint3ArrayToFloat32(getPrimPropAtTime(a.prim as SdfPrimSpec, 'points', time));
       if (!pts) continue;
