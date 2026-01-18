@@ -7,9 +7,8 @@ import { buildJointOrderIndexToBoneIndex, extractJointOrderNames } from '../../u
 import { getPropMetadataNumber, parseNumberArray } from '../../usdParse';
 import { parseMatrix4d } from '../../threeXform';
 
-// Baseline mode: get correct static deformation in rest/original pose first.
-// (We’ll re-enable animation once bind-space is verified.)
-const ENABLE_USD_SKEL_ANIM = false;
+// Enable USD skeletal animation
+const ENABLE_USD_SKEL_ANIM = false; // Disabled for synthetic rotation test
 
 type PendingSkinnedMesh = {
     container: THREE.Object3D;

@@ -25,7 +25,7 @@ import { extractDependencies, fetchCorpusFile } from './corpus';
 import { createCorpusHashHelpers } from './corpusHash';
 import { applyCameraSettings as applyCameraSettingsExternal, frameToFit as frameToFitExternal } from './camera';
 import { applyRenderSettings as applyRenderSettingsExternal, ensurePost as ensurePostExternal } from './postprocessing';
-import { advanceAnimationPlayback, applyAnimatedObjectsAtTime } from './animationPlayback';
+import { advanceAnimationPlayback, applyAnimatedObjectsAtTime, applySyntheticRotationToSkeletons } from './animationPlayback';
 import { getThreeDebugInfo as getThreeDebugInfoExternal } from './threeDebug';
 import { getGpuResourcesInfo as getGpuResourcesInfoExternal } from './gpuResources';
 import { buildThreeSceneTree, findObjectByUuid, getObjectProperties, setObjectProperty, EDITABLE_PROPERTIES, parseMaterialKey, findMaterialByKey, getMaterialProperties, setMaterialProperty, parseTextureKey, findTextureByKey, getTextureProperties, setTextureProperty, findTextureByUuid as findTextureByUuidExternal } from './threeSceneTree';
@@ -435,6 +435,12 @@ export function createViewerCore(opts: {
       lastAnimationFrameTime,
       animatedObjects,
     }));
+
+    // Apply synthetic rotation to skeletons when animation is NOT playing (for debug slider)
+    // This now stores base pose and applies rotation on top, avoiding accumulation.
+    if (!animationPlaying) {
+      applySyntheticRotationToSkeletons(animatedObjects);
+    }
 
     // Use dirty checking instead of forcing full update every frame
     // Three.js automatically marks objects dirty when position/quaternion/scale change,

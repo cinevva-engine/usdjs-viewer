@@ -306,7 +306,10 @@ export function createRunPipeline(opts: {
         let minTime = Infinity;
         let maxTime = -Infinity;
         for (const a of animatedObjects) {
-          const range = getPrimAnimationTimeRange(a.prim);
+          // Get prim based on animation kind
+          const prim = a.kind === 'skeleton' ? a.animData.animPrim : a.prim;
+          if (!prim) continue;
+          const range = getPrimAnimationTimeRange(prim);
           if (range) {
             minTime = Math.min(minTime, range.start);
             maxTime = Math.max(maxTime, range.end);

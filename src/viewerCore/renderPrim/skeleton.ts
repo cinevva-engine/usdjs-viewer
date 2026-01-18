@@ -4,6 +4,7 @@ import type { SdfPrimSpec } from '@cinevva/usdjs';
 import { getPrimProp } from '../usdAnim';
 import { parseMatrix4dArray } from '../threeXform';
 import { buildJointOrderIndexToBoneIndex } from '../usdSkeleton';
+import type { AnimatedObject, SkelAnimationData } from '../types';
 
 // Baseline: match authored mesh pose first.
 // For most USD assets, authored mesh points are in bind pose.
@@ -11,6 +12,16 @@ const BASELINE_POSE: 'bind' | 'rest' = 'bind';
 
 // Debug: force identity bone matrices to test if issue is in bone transforms or inverses
 const FORCE_IDENTITY_BONE_MATRICES = false;
+
+// Debug settings object - exposed on window for console access
+export const skeletonDebugSettings = {
+  syntheticBoneRotation: 0.001, // radians, about 0.06 degrees
+};
+
+// Expose on window for easy console access
+if (typeof window !== 'undefined') {
+  (window as any).skeletonDebug = skeletonDebugSettings;
+}
 
 // Correct USD interpretation:
 // - bindTransforms are WORLD-SPACE joint transforms at bind pose
@@ -33,8 +44,10 @@ export function renderUsdSkeletonPrim(opts: {
   primPath: string;
   unitScale: number;
   skeletonsToUpdate: Array<{ skeleton: THREE.Skeleton; boneRoot: THREE.Object3D }>;
+  animatedObjects: AnimatedObject[];
+  rootPrim: SdfPrimSpec;
 }): boolean {
-  const { typeName, container, helpersParent, helpers, sceneRef, prim, primPath, unitScale, skeletonsToUpdate } = opts;
+  const { typeName, container, helpersParent, helpers, sceneRef, prim, primPath, unitScale, skeletonsToUpdate, animatedObjects, rootPrim } = opts;
 
   // USD Skeleton support - create Three.js Skeleton and SkeletonHelper visualization
   if (typeName === 'Skeleton') {
@@ -126,7 +139,7 @@ export function renderUsdSkeletonPrim(opts: {
           for (let i = 0; i < jointNames.length; i++) {
             const worldMat = mats[i];
             if (!worldMat) continue;
-            
+
             // Convert world-space to local-space
             // local = parentWorld^-1 * boneWorld
             const parentIdx = parents[i];
@@ -138,7 +151,7 @@ export function renderUsdSkeletonPrim(opts: {
               // Root bone: local = world
               localMat = worldMat.clone();
             }
-            
+
             localMat.decompose(pos, rot, scale);
             pos.multiplyScalar(unitScale);
             bones[i]!.position.copy(pos);
@@ -179,7 +192,7 @@ export function renderUsdSkeletonPrim(opts: {
             bone.updateMatrix();
           }
           container.updateWorldMatrix(true, false);
-          skelRoot.updateWorldMatrix(true);
+          skelRoot.updateWorldMatrix(true, true);
         }
 
         // --- Compute bone inverses (baseline) ---
@@ -219,7 +232,7 @@ export function renderUsdSkeletonPrim(opts: {
         if (FORCE_IDENTITY_BONE_MATRICES) {
           // Identity case: inverses computed from identity pose (already set above)
           container.updateWorldMatrix(true, false);
-          skelRoot.updateWorldMatrix(true);
+          skelRoot.updateWorldMatrix(true, true);
           skeleton.calculateInverses();
         } else if (USD_CORRECT_BIND_WORLD_SPACE && bindTransforms && bindTransforms.length === jointNames.length) {
           // Correct USD interpretation:
@@ -236,13 +249,13 @@ export function renderUsdSkeletonPrim(opts: {
             bindWorld.decompose(pos, rot, scale);
             pos.multiplyScalar(unitScale);
             const scaledBind = new THREE.Matrix4().compose(pos, rot, scale);
-            
+
             // Invert to get boneInverse (same as USD's inverseBindTransforms)
             boneInverses.push(scaledBind.clone().invert());
           }
           skeleton.boneInverses = boneInverses;
-          
-          // Skeleton stays in rest pose for visualization (already set above)
+
+          // Skeleton stays in bind pose for correct skinning (already set above via applyWorldTransforms)
         } else if (bindTransforms && bindTransforms.length === jointNames.length) {
           // Try bindTransforms as world-space matrices directly
           // USD bindTransforms are typically world-space (absolute transforms in bind pose)
@@ -278,23 +291,23 @@ export function renderUsdSkeletonPrim(opts: {
             }
           }
           container.updateWorldMatrix(true, false);
-          skelRoot.updateWorldMatrix(true);
-          
+          skelRoot.updateWorldMatrix(true, true);
+
           // Manually compute boneInverses from bind pose world matrices
           const boneInverses: THREE.Matrix4[] = [];
           for (const bone of bones) {
             boneInverses.push(bone.matrixWorld.clone().invert());
           }
           skeleton.boneInverses = boneInverses;
-          
+
           // Restore rest pose for visualization
           applyLocalTransforms(restTransforms ?? bindTransforms);
           container.updateWorldMatrix(true, false);
-          skelRoot.updateWorldMatrix(true);
+          skelRoot.updateWorldMatrix(true, true);
         } else {
           // Fallback: compute inverses from current pose (rest or identity)
           container.updateWorldMatrix(true, false);
-          skelRoot.updateWorldMatrix(true);
+          skelRoot.updateWorldMatrix(true, true);
           skeleton.calculateInverses();
         }
 
@@ -304,6 +317,18 @@ export function renderUsdSkeletonPrim(opts: {
 
         // Add skeleton and bone root to the update list so it's updated every frame for SkinnedMesh
         skeletonsToUpdate.push({ skeleton, boneRoot: skelRoot });
+
+        // Register skeleton animation if skel:animationSource is defined on parent SkelRoot
+        registerSkeletonAnimation({
+          skeleton,
+          bones,
+          jointNames,
+          bindTransforms,
+          unitScale,
+          primPath,
+          rootPrim,
+          animatedObjects,
+        });
 
         // Create and add SkeletonHelper - it draws lines between bones
         const skelHelper = new THREE.SkeletonHelper(skelRoot);
@@ -319,6 +344,9 @@ export function renderUsdSkeletonPrim(opts: {
 
         // Store helper reference for later access
         helpers.set(primPath + '/skeleton_helper', skelHelper);
+
+        // Note: Synthetic debug rotation is now applied in the render loop via applySyntheticRotationToSkeletons()
+        // This allows live slider control. See skeletonDebugSettings.syntheticBoneRotation
 
         // If any meshes referenced this skeleton before it was rendered, bind them now.
         const pendingMap: Map<string, any[]> | undefined = (sceneRef as any).__usdPendingSkins;
@@ -391,4 +419,101 @@ export function renderUsdSkeletonPrim(opts: {
   return false;
 }
 
+/**
+ * Find and register SkelAnimation for a skeleton.
+ * SkelAnimation is referenced via skel:animationSource on the parent SkelRoot.
+ */
+function registerSkeletonAnimation(opts: {
+  skeleton: THREE.Skeleton;
+  bones: THREE.Bone[];
+  jointNames: string[];
+  bindTransforms: THREE.Matrix4[] | null;
+  unitScale: number;
+  primPath: string;
+  rootPrim: SdfPrimSpec;
+  animatedObjects: AnimatedObject[];
+}): void {
+  const { skeleton, bones, jointNames, bindTransforms, unitScale, primPath, rootPrim, animatedObjects } = opts;
 
+  // Find parent SkelRoot to get skel:animationSource
+  // The skeleton path is like /Root/SkelRoot/Skeleton, we need to find /Root/SkelRoot
+  const pathParts = primPath.split('/').filter(Boolean);
+  let skelRootPrim: SdfPrimSpec | null = null;
+  let animSourcePath: string | null = null;
+
+  // Walk up from skeleton to find SkelRoot with animationSource
+  for (let i = pathParts.length - 1; i >= 0; i--) {
+    const ancestorPath = '/' + pathParts.slice(0, i + 1).join('/');
+    const ancestorPrim = findPrimByPath(rootPrim, ancestorPath);
+    if (ancestorPrim?.typeName === 'SkelRoot') {
+      skelRootPrim = ancestorPrim;
+      const animSourceProp = ancestorPrim.properties?.get('skel:animationSource');
+      if (animSourceProp?.defaultValue?.type === 'sdfpath') {
+        animSourcePath = animSourceProp.defaultValue.value as string;
+      }
+      break;
+    }
+  }
+
+  if (!animSourcePath) {
+    // No animation source found
+    return;
+  }
+
+  // Find the SkelAnimation prim
+  const animPrim = findPrimByPath(rootPrim, animSourcePath);
+  if (!animPrim || animPrim.typeName !== 'SkelAnimation') {
+    console.warn(`[Skeleton] Could not find SkelAnimation at ${animSourcePath}`);
+    return;
+  }
+
+  // Get animation joints
+  const animJointsProp = getPrimProp(animPrim, 'joints');
+  if (!animJointsProp || animJointsProp.type !== 'array') {
+    console.warn(`[Skeleton] SkelAnimation ${animSourcePath} has no joints property`);
+    return;
+  }
+  const animJoints: string[] = (animJointsProp.value as any[]).filter((j: any) => typeof j === 'string');
+
+  // Build mapping from animation joint index to skeleton bone index
+  const jointToBoneIndex: number[] = [];
+  for (let i = 0; i < animJoints.length; i++) {
+    const animJoint = animJoints[i]!;
+    const boneIdx = jointNames.indexOf(animJoint);
+    jointToBoneIndex.push(boneIdx);
+  }
+
+  // Create animation data
+  const animData: SkelAnimationData = {
+    animPrim,
+    joints: animJoints,
+    jointToBoneIndex,
+  };
+
+  // Register animated skeleton
+  animatedObjects.push({
+    kind: 'skeleton',
+    skeleton,
+    bones,
+    animData,
+    unitScale,
+    bindTransforms: bindTransforms ?? [],
+  });
+
+  console.log(`[Skeleton] Registered animation for ${primPath} from ${animSourcePath} with ${animJoints.length} joints`);
+}
+
+/**
+ * Find a prim by path in the composed scene tree.
+ */
+function findPrimByPath(root: SdfPrimSpec, path: string): SdfPrimSpec | null {
+  if (!path || path === '/') return root;
+  const parts = path.split('/').filter(Boolean);
+  let current: SdfPrimSpec | null = root;
+  for (const part of parts) {
+    if (!current?.children) return null;
+    current = current.children.get(part) ?? null;
+    if (!current) return null;
+  }
+  return current;
+}

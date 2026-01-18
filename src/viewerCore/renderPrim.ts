@@ -234,6 +234,8 @@ export function renderPrim(
     primPath: node.path,
     unitScale,
     skeletonsToUpdate,
+    animatedObjects: animatedObjects ?? [],
+    rootPrim,
   });
 
   for (const child of node.children) {

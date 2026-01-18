@@ -759,6 +759,19 @@
           </div>
           <span class="timeline-time">{{ formatTime(animationCurrentTime) }} / {{ formatTime(animationEndTime) }}</span>
         </div>
+        <!-- Debug: Synthetic bone rotation slider -->
+        <div class="debug-controls" v-if="showDebugControls">
+          <label class="debug-label">Bone Rotation: {{ debugBoneRotation.toFixed(3) }} rad</label>
+          <input
+            type="range"
+            class="debug-slider"
+            :min="-1"
+            :max="1"
+            :step="0.001"
+            v-model.number="debugBoneRotation"
+            @input="onDebugBoneRotationChange"
+          />
+        </div>
       </div>
     </SplitterPanel>
   </Splitter>
@@ -786,6 +799,7 @@ import { CORPUS_GROUPS } from './corpusRegistry';
 import type { PrimeTreeNode, ViewerCore } from './viewerCore';
 import type { GpuResourcesInfo } from './viewerCore/types';
 import { createViewerCore } from './viewerCore';
+import { skeletonDebugSettings } from './viewerCore/renderPrim/skeleton';
 import MonacoEditor from './components/MonacoEditor.vue';
 
 const viewportEl = ref<HTMLElement | null>(null);
@@ -1630,6 +1644,16 @@ const animationPlaying = ref(false);
 const animationCurrentTime = ref(0);
 const animationStartTime = ref(0);
 const animationEndTime = ref(0);
+
+// Debug controls
+const showDebugControls = ref(true); // Set to true to show debug slider
+const debugBoneRotation = ref(skeletonDebugSettings.syntheticBoneRotation);
+
+function onDebugBoneRotationChange() {
+  skeletonDebugSettings.syntheticBoneRotation = debugBoneRotation.value;
+  // Force re-render by invalidating the scene
+  // The rotation is applied per-frame so just updating the setting should work
+}
 let animationUpdateInterval: number | null = null;
 
 function syncEntryOptions() {
@@ -2987,6 +3011,43 @@ onBeforeUnmount(() => {
   color: rgba(255, 255, 255, 0.75);
   min-width: 80px;
   text-align: right;
+}
+
+/* Debug controls */
+.debug-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.debug-label {
+  font-size: 11px;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  color: rgba(255, 200, 100, 0.9);
+  min-width: 160px;
+}
+
+.debug-slider {
+  width: 150px;
+  height: 4px;
+  -webkit-appearance: none;
+  appearance: none;
+  background: rgba(255, 200, 100, 0.3);
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.debug-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 12px;
+  height: 12px;
+  border: none;
+  border-radius: 50%;
+  background: #f59e0b;
+  cursor: pointer;
 }
 </style>
 

@@ -127,9 +127,17 @@ export type GpuResourcesInfo = {
     };
 };
 
+export type SkelAnimationData = {
+    animPrim: SdfPrimSpec;
+    joints: string[];
+    /** Maps animation joint index to skeleton bone index */
+    jointToBoneIndex: number[];
+};
+
 export type AnimatedObject =
     | { kind: 'xform'; obj: THREE.Object3D; prim: SdfPrimSpec; unitScale: number }
-    | { kind: 'points'; geoms: THREE.BufferGeometry[]; prim: SdfPrimSpec; unitScale: number };
+    | { kind: 'points'; geoms: THREE.BufferGeometry[]; prim: SdfPrimSpec; unitScale: number }
+    | { kind: 'skeleton'; skeleton: THREE.Skeleton; bones: THREE.Bone[]; animData: SkelAnimationData; unitScale: number; bindTransforms: THREE.Matrix4[] };
 
 export type ViewerCore = {
     getDefaultUsda(): string;
