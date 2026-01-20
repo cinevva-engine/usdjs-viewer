@@ -46,6 +46,8 @@ function convertOmniverseUrl(omniverseUrl: string): string | null {
 
 export function createResolveAssetUrl(opts: {
   getCurrentIdentifier: () => string | null | undefined;
+  /** Base URL for static asset resolution. When set, assets are fetched directly instead of using /__usdjs_corpus endpoint. */
+  staticAssetBaseUrl?: string;
 }): (assetPath: string, fromIdentifier?: string) => string | null {
   return (assetPath: string, fromIdentifier?: string): string | null => {
     try {
@@ -59,6 +61,7 @@ export function createResolveAssetUrl(opts: {
           assetPath,
           fromIdentifier,
           currentIdentifier: opts.getCurrentIdentifier(),
+          staticAssetBaseUrl: opts.staticAssetBaseUrl,
         });
       }
 
@@ -159,6 +162,42 @@ export function createResolveAssetUrl(opts: {
         const result = `/__usdjs_proxy?url=${encodeURIComponent(resolved)}`;
         if (USDDEBUG) {
           console.log('[TEXTURE:resolveAssetUrl] HTTP URL', { resolved, result });
+        }
+        return result;
+      }
+
+      // If staticAssetBaseUrl is set, resolve directly to that URL
+      if (opts.staticAssetBaseUrl) {
+        // For static sites: resolve asset path relative to the base URL
+        // The resolved path might be absolute or relative - we need to extract just the relative part
+        let relPath = resolved;
+        
+        // Strip common prefixes
+        if (resolved.startsWith('packages/usdjs/')) {
+          relPath = resolved.slice('packages/usdjs/'.length);
+        }
+        // Handle paths that start with the identifier directory
+        const identifierDir = identifier ? identifier.substring(0, identifier.lastIndexOf('/') + 1) : '';
+        if (identifierDir && relPath.startsWith(identifierDir)) {
+          relPath = relPath.slice(identifierDir.length);
+        }
+        // Handle ./relative paths
+        if (relPath.startsWith('./')) {
+          relPath = relPath.slice(2);
+        }
+        
+        const baseUrl = opts.staticAssetBaseUrl.endsWith('/') 
+          ? opts.staticAssetBaseUrl 
+          : opts.staticAssetBaseUrl + '/';
+        const result = baseUrl + relPath;
+        
+        if (USDDEBUG) {
+          console.log('[TEXTURE:resolveAssetUrl] STATIC', {
+            resolved,
+            relPath,
+            baseUrl,
+            result,
+          });
         }
         return result;
       }

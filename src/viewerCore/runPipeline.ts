@@ -15,6 +15,8 @@ export function createRunPipeline(opts: {
   onSceneTree?: (tree: SceneNode) => void;
 
   externalFiles: Map<string, { name: string; text: string; binary?: ArrayBuffer }>;
+  /** Base URL for static asset fetching (for static sites without backend) */
+  staticAssetBaseUrl?: string;
   getEntryKey: () => string;
   getTextareaText: () => string;
   getCompose: () => boolean;
@@ -85,6 +87,7 @@ export function createRunPipeline(opts: {
     onTree,
     onSceneTree,
     externalFiles,
+    staticAssetBaseUrl,
     getEntryKey,
     getTextareaText,
     getCompose,
@@ -138,7 +141,7 @@ export function createRunPipeline(opts: {
       dbg('run start', { entryKey: getEntryKey(), compose: getCompose(), selectedPath: getSelectedPath() });
       perfMark(perf('start'));
       onStatus('Parsing…');
-      const resolver = createTextResolver({ externalFiles, dbg });
+      const resolver = createTextResolver({ externalFiles, dbg, staticAssetBaseUrl });
 
       const entryKey = getEntryKey();
       const textareaText = getTextareaText();

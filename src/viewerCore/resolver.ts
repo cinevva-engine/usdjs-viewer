@@ -18,6 +18,8 @@ export type TextResolver = {
 export function createTextResolver(opts: {
     externalFiles: Map<string, { name: string; text: string; binary?: ArrayBuffer }>;
     dbg: (...args: any[]) => void;
+    /** Base URL for static asset fetching (for static sites without backend) */
+    staticAssetBaseUrl?: string;
 }): TextResolver {
     const { externalFiles, dbg } = opts;
 
@@ -224,6 +226,54 @@ export function createTextResolver(opts: {
                     const out = { identifier: resolved, text: v.text };
                     textCache.set(resolved, out);
                     return out;
+                }
+            }
+
+            // If staticAssetBaseUrl is set, try fetching from static URL
+            if (opts.staticAssetBaseUrl) {
+                try {
+                    // Build static URL from the resolved path
+                    let relPath = resolved;
+                    // Handle ./relative paths
+                    if (relPath.startsWith('./')) {
+                        relPath = relPath.slice(2);
+                    }
+                    
+                    const baseUrl = opts.staticAssetBaseUrl.endsWith('/') 
+                        ? opts.staticAssetBaseUrl 
+                        : opts.staticAssetBaseUrl + '/';
+                    const staticUrl = baseUrl + relPath;
+                    
+                    dbg('Fetching from static URL:', { assetPath, resolved, staticUrl });
+                    
+                    const response = await fetch(staticUrl);
+                    if (response.ok) {
+                        const text = await response.text();
+                        
+                        // Validate it looks like USDA
+                        if (text.trim().startsWith('#usda') || text.trim().startsWith('#USD')) {
+                            const out = { identifier: resolved, text };
+                            textCache.set(resolved, out);
+                            return out;
+                        }
+                        
+                        // Check for binary USD (USDC)
+                        if (text.substring(0, 8).includes('PXR-USDC')) {
+                            // For binary files, we need to re-fetch as ArrayBuffer
+                            const binaryResponse = await fetch(staticUrl);
+                            const binary = await binaryResponse.arrayBuffer();
+                            const data = new Uint8Array(binary);
+                            const { parseUsdcToLayer } = await import('@cinevva/usdjs');
+                            const layer = parseUsdcToLayer(data, { identifier: resolved });
+                            return { identifier: resolved, layer };
+                        }
+                        
+                        console.warn(`Static file doesn't look like USD: ${staticUrl}`);
+                    } else {
+                        dbg('Static fetch failed:', { staticUrl, status: response.status });
+                    }
+                } catch (err) {
+                    dbg('Static fetch error:', { assetPath, resolved, err });
                 }
             }
 

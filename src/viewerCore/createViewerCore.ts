@@ -96,6 +96,8 @@ export function createViewerCore(opts: {
   viewportEl: HTMLElement;
   onStatus: (msg: string) => void;
   onTree: (nodes: PrimeTreeNode[], selectedPath: string | null) => void;
+  /** Base URL for static asset resolution (e.g., '/models/Kitchen_set/'). When set, assets are fetched directly from this URL instead of using /__usdjs_corpus endpoint. */
+  staticAssetBaseUrl?: string;
 }): ViewerCore {
   // Debug logging (opt-in): add `?usddebug=1` to the URL or set `localStorage.usddebug = "1"`.
   // Keep logs throttled so huge scenes don't spam the console.
@@ -161,7 +163,10 @@ export function createViewerCore(opts: {
   let currentIdentifier = '<viewer>';
   let stageUnitScale = 1.0; // metersPerUnit (defaults to 1m per unit)
 
-  const resolveAssetUrl = createResolveAssetUrl({ getCurrentIdentifier: () => currentIdentifier });
+  const resolveAssetUrl = createResolveAssetUrl({ 
+    getCurrentIdentifier: () => currentIdentifier,
+    staticAssetBaseUrl: opts.staticAssetBaseUrl,
+  });
   const getReferenceImageUrl = createGetReferenceImageUrl({ getEntryKey: () => entryKey });
 
   // Animation state
@@ -1138,6 +1143,7 @@ export function createViewerCore(opts: {
       buildPrimToObjectMap();
     },
     externalFiles,
+    staticAssetBaseUrl: opts.staticAssetBaseUrl,
     getEntryKey: () => entryKey,
     getTextareaText: () => textareaText,
     getCompose: () => compose,
