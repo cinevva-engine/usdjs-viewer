@@ -14,7 +14,14 @@ export default defineConfig({
   themeConfig: {
     nav: [
       { text: 'Guide', link: '/' },
-      { text: 'usdjs Core', link: 'https://cinevva-engine.github.io/usdjs/' },
+      {
+        text: 'Ecosystem',
+        items: [
+          { text: 'usdjs (Core)', link: 'https://cinevva-engine.github.io/usdjs/' },
+          { text: 'usdjs-viewer', link: 'https://cinevva-engine.github.io/usdjs-viewer/' },
+          { text: 'usdjs-renderer', link: 'https://cinevva-engine.github.io/usdjs-renderer/' },
+        ]
+      }
     ],
 
     sidebar: [
