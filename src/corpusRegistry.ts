@@ -1,8 +1,8 @@
-import curatedFtlab from '../../usdjs/test/corpus/curated-ftlab-parser-files.json';
-import curatedUsdwg from '../../usdjs/test/corpus/curated-usdwg-parser-files.json';
-import curatedNvidia from '../../usdjs/test/corpus/curated-nvidia-omniverse-scene-templates.json';
-import curatedIndustrial from '../../usdjs/test/corpus/curated-nvidia-industrial.json';
-import curatedKitchenSet from '../../usdjs/test/corpus/curated-kitchen-set.json';
+import curatedFtlab from './corpusManifests/curated-ftlab-parser-files.json';
+import curatedUsdwg from './corpusManifests/curated-usdwg-parser-files.json';
+import curatedNvidia from './corpusManifests/curated-nvidia-omniverse-scene-templates.json';
+import curatedIndustrial from './corpusManifests/curated-nvidia-industrial.json';
+import curatedKitchenSet from './corpusManifests/curated-kitchen-set.json';
 
 type Curated = { files?: string[] };
 

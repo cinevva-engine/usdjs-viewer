@@ -8,9 +8,14 @@ export function createCorpusHashHelpers(opts: {
     readCorpusHash: () => string | null;
 } {
     const { corpusPathPrefix: CORPUS_PATH_PREFIX, hashPrefixCorpus: HASH_PREFIX_CORPUS } = opts;
+    const LEGACY_PREFIXES = ['packages/usdjs/'];
 
     const normalizeCorpusPathForHash = (rel: string): string => {
-        // Ensure path starts with packages/usdjs/ for hash storage
+        // Normalize to the chosen prefix for hash storage.
+        // Also accept legacy monorepo prefixes (e.g. `packages/usdjs/`) without duplicating them.
+        for (const p of LEGACY_PREFIXES) {
+            if (rel.startsWith(p)) return rel;
+        }
         if (rel.startsWith(CORPUS_PATH_PREFIX)) {
             return rel;
         }
@@ -18,7 +23,10 @@ export function createCorpusHashHelpers(opts: {
     };
 
     const normalizeCorpusPathForFetch = (rel: string): string => {
-        // Strip packages/usdjs/ prefix if present, since fetchCorpusFile expects relative paths
+        // Strip the chosen prefix (and known legacy prefixes) so fetchCorpusFile receives a repo-relative path.
+        for (const p of LEGACY_PREFIXES) {
+            if (rel.startsWith(p)) return rel.slice(p.length);
+        }
         if (rel.startsWith(CORPUS_PATH_PREFIX)) {
             return rel.slice(CORPUS_PATH_PREFIX.length);
         }

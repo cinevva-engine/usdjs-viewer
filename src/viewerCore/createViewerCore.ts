@@ -145,7 +145,11 @@ export function createViewerCore(opts: {
   };
 
   const HASH_PREFIX_CORPUS = '#corpus=';
-  const CORPUS_PATH_PREFIX = 'packages/usdjs/';
+  // Corpus paths are stored as repo-relative strings like:
+  //   test/corpus/external/.../file.usda
+  // Historically we also supported storing `packages/usdjs/`-prefixed paths in the hash (monorepo layout).
+  // We keep backward-compat via `createCorpusHashHelpers`.
+  const CORPUS_PATH_PREFIX = '';
   const { normalizeCorpusPathForHash, normalizeCorpusPathForFetch, setCorpusHash, readCorpusHash } =
     createCorpusHashHelpers({ corpusPathPrefix: CORPUS_PATH_PREFIX, hashPrefixCorpus: HASH_PREFIX_CORPUS });
 

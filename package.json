@@ -1,17 +1,25 @@
 {
     "name": "@cinevva/usdjs-viewer",
-    "version": "0.0.1",
-    "private": true,
+    "version": "0.1.0",
     "type": "module",
-    "description": "Detached browser viewer for @cinevva/usdjs (Three.js-based).",
+    "description": "Browser viewer for @cinevva/usdjs (Three.js-based).",
     "license": "MIT",
+    "author": "Cinevva",
+    "homepage": "https://github.com/cinevva/usdjs-viewer#readme",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/cinevva/usdjs-viewer.git"
+    },
+    "bugs": {
+        "url": "https://github.com/cinevva/usdjs-viewer/issues"
+    },
     "scripts": {
         "dev": "vite",
         "build": "vite build",
         "preview": "vite preview"
     },
     "dependencies": {
-        "@cinevva/usdjs": "file:../usdjs",
+        "@cinevva/usdjs": "^0.1.0",
         "@primeuix/themes": "^1.2.2",
         "monaco-editor": "^0.45.0",
         "primeflex": "^3.3.1",
@@ -25,5 +33,8 @@
         "@vitejs/plugin-vue": "^6.0.1",
         "typescript": "^5.9.3",
         "vite": "^6.0.0"
+    },
+    "publishConfig": {
+        "access": "public"
     }
 }

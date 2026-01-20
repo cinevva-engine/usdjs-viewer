@@ -1,0 +1,25 @@
+{
+  "version": 1,
+  "source": "NVIDIA Omniverse - Default Scene Templates Pack",
+  "notes": "Small, visually useful NVIDIA Omniverse USD scenes (downloaded from Omniverse USD docs). Intended for usdjs-viewer sample browsing.",
+  "files": [
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Default/DefaultStage.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Default/SubUSDs/Hex.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Default/SubUSDs/Plane_Slotted.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/clean_cloudy_sky_and_floor.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/abandoned_parking_lot.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/white_void.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/display_pedestal.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/display_riser.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/props/curved_backdrop_360.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/props/pedestal.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Basic/props/riser.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Outdoor/Puddles.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/Interior/ZetCG_ExhibitionHall.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/LookDev/Decor_Concrete.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/LookDev/Decor_Wood.usd",
+    "test/corpus/external/nvidia-omniverse-scene-templates/Assets/Scenes/Templates/LookDev/props/Studio_backdrop.usd"
+  ],
+  "generatedAt": "2025-12-20T00:00:00.000Z"
+}
+

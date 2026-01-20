@@ -35,7 +35,29 @@ function getUseUsdcatFallback(req?: any): boolean {
 }
 
 const viewerRoot = path.dirname(fileURLToPath(import.meta.url));
-const usdjsRoot = path.resolve(viewerRoot, '../usdjs');
+function resolveUsdjsRoot(): string | null {
+    const env = process.env.USDJS_ROOT ?? process.env.USDJS_CORPUS_ROOT;
+    const candidates = [
+        env,
+        path.resolve(viewerRoot, '../cinevva-usdjs'),
+        path.resolve(viewerRoot, '../usdjs'),
+    ].filter((x): x is string => typeof x === 'string' && x.length > 0);
+
+    for (const abs of candidates) {
+        try {
+            // Heuristic: any checkout of the core repo should have `test/corpus` and a package.json.
+            if (!fs.existsSync(abs)) continue;
+            if (!fs.existsSync(path.join(abs, 'package.json'))) continue;
+            if (!fs.existsSync(path.join(abs, 'test', 'corpus'))) continue;
+            return abs;
+        } catch {
+            // ignore
+        }
+    }
+    return null;
+}
+
+const usdjsRoot = resolveUsdjsRoot();
 const cacheDir = path.join(viewerRoot, '.cache', 'usd-conversions');
 
 // Ensure cache directory exists
@@ -329,11 +351,10 @@ async function convertUsdToUsdaWithUsdcat(filePath: string, cacheKey: string): P
 
 export default defineConfig({
     resolve: {
-        // For HMR: resolve @cinevva/usdjs to source TypeScript instead of dist
-        // This allows Vite to compile TypeScript on-the-fly and enable HMR
-        alias: {
-            '@cinevva/usdjs': path.resolve(usdjsRoot, 'src/index.ts'),
-        },
+        // Optional dev convenience: if you have a checkout of the core repo available locally,
+        // you can uncomment the alias below to use source TypeScript for faster iteration.
+        //
+        // alias: { '@cinevva/usdjs': path.resolve(usdjsRoot ?? '', 'src/index.ts') },
     },
     plugins: [
         vue(),
@@ -343,6 +364,17 @@ export default defineConfig({
 
                 server.middlewares.use('/__usdjs_corpus', async (req, res) => {
                     try {
+                        if (!usdjsRoot) {
+                            res.statusCode = 500;
+                            res.setHeader('content-type', 'text/plain; charset=utf-8');
+                            res.end(
+                                'USDJS corpus root is not configured.\n' +
+                                'Set USDJS_ROOT (or USDJS_CORPUS_ROOT) to a local checkout of the core repo.\n' +
+                                'Example:\n' +
+                                '  USDJS_ROOT=/abs/path/to/cinevva-usdjs npm run dev\n'
+                            );
+                            return;
+                        }
                         // Check URL parameter for usdcat fallback control
                         const useUsdcatFallback = getUseUsdcatFallback(req);
 
@@ -372,7 +404,7 @@ export default defineConfig({
                             return;
                         }
 
-                        // Only allow reads under packages/usdjs/.
+                        // Only allow reads under the configured USDJS root.
                         const abs = path.resolve(usdjsRoot, rel);
                         const normalizedUsdjsRoot = path.normalize(usdjsRoot);
                         const normalizedAbs = path.normalize(abs);

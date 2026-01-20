@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "source": "Kitchen_set Corpus",
+  "notes": "Kitchen set USD scenes with various kitchen assets and props.",
+  "files": [
+    "test/corpus/external/Kitchen_set/Kitchen_set.usd",
+    "test/corpus/external/Kitchen_set/Kitchen_set_instanced.usd"
+  ],
+  "generatedAt": "2025-01-27T00:00:00.000Z"
+}
+
