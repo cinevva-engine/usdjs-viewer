@@ -5,18 +5,21 @@
     "description": "Browser viewer for @cinevva/usdjs (Three.js-based).",
     "license": "MIT",
     "author": "Cinevva",
-    "homepage": "https://github.com/cinevva/usdjs-viewer#readme",
+    "homepage": "https://cinevva-engine.github.io/usdjs-viewer/",
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/cinevva/usdjs-viewer.git"
+        "url": "git+https://github.com/cinevva-engine/usdjs-viewer.git"
     },
     "bugs": {
-        "url": "https://github.com/cinevva/usdjs-viewer/issues"
+        "url": "https://github.com/cinevva-engine/usdjs-viewer/issues"
     },
     "scripts": {
         "dev": "vite",
         "build": "vite build",
-        "preview": "vite preview"
+        "preview": "vite preview",
+        "docs:dev": "vitepress dev docs",
+        "docs:build": "vitepress build docs",
+        "docs:preview": "vitepress preview docs"
     },
     "dependencies": {
         "@cinevva/usdjs": "^0.1.0",
@@ -32,7 +35,8 @@
     "devDependencies": {
         "@vitejs/plugin-vue": "^6.0.1",
         "typescript": "^5.9.3",
-        "vite": "^6.0.0"
+        "vite": "^6.0.0",
+        "vitepress": "^1.5.0"
     },
     "publishConfig": {
         "access": "public"
